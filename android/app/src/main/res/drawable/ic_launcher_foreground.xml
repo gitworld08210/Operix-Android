@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive-icon foreground: the "1" mark of Oneleven drawn as a vector so
+     no binary PNG assets are required. Rendered on a 108x108dp canvas with the
+     inner 72x72dp safe zone (18dp inset) used for the glyph. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#1D9BF0"
+        android:pathData="M58.5,34 L58.5,74 L50.5,74 L50.5,44 L43,48 L43,40 L52,34 Z" />
+</vector>
