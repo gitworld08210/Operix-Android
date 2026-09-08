@@ -12,6 +12,8 @@ import '../utils/format.dart';
 import '../widgets/avatar.dart';
 import '../widgets/post_card.dart';
 import '../widgets/verified_badge.dart';
+import 'edit_profile_screen.dart';
+import 'settings_screen.dart';
 
 /// Profile screen with a banner, overlapping avatar, bio + counts, and
 /// Posts / Media tabs.
@@ -48,6 +50,18 @@ class _ProfileScreenState extends State<ProfileScreen>
       .where((p) => p.author.id == widget.profile.id)
       .toList();
 
+  void _openSettings() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => const SettingsScreen()),
+    );
+  }
+
+  void _openEditProfile() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => const EditProfileScreen()),
+    );
+  }
+
   Future<void> _signOut() async {
     try {
       await AuthRepository.instance.signOut();
@@ -82,12 +96,18 @@ class _ProfileScreenState extends State<ProfileScreen>
                 pinned: true,
                 title: Text(profile.displayName),
                 actions: <Widget>[
-                  if (_isCurrentUser)
+                  if (_isCurrentUser) ...<Widget>[
+                    IconButton(
+                      tooltip: 'Settings',
+                      icon: const Icon(Icons.settings_outlined),
+                      onPressed: _openSettings,
+                    ),
                     IconButton(
                       tooltip: 'Sign out',
                       icon: const Icon(Icons.logout),
                       onPressed: _signOut,
                     ),
+                  ],
                 ],
                 expandedHeight: 140,
                 flexibleSpace: FlexibleSpaceBar(
@@ -98,6 +118,7 @@ class _ProfileScreenState extends State<ProfileScreen>
                 child: _ProfileHeader(
                   profile: profile,
                   isCurrentUser: _isCurrentUser,
+                  onEditProfile: _openEditProfile,
                 ),
               ),
               SliverPersistentHeader(
@@ -157,10 +178,15 @@ class _Banner extends StatelessWidget {
 }
 
 class _ProfileHeader extends StatelessWidget {
-  const _ProfileHeader({required this.profile, required this.isCurrentUser});
+  const _ProfileHeader({
+    required this.profile,
+    required this.isCurrentUser,
+    required this.onEditProfile,
+  });
 
   final UserProfile profile;
   final bool isCurrentUser;
+  final VoidCallback onEditProfile;
 
   @override
   Widget build(BuildContext context) {
@@ -188,24 +214,16 @@ class _ProfileHeader extends StatelessWidget {
                 ),
                 Padding(
                   padding: const EdgeInsets.only(bottom: 4),
-                  // TODO(avatar-upload): when this is the current user, an
-                  // "Edit profile" flow can update the avatar via
-                  // StorageService.uploadAvatar. No image_picker dependency is
-                  // bundled (deps kept minimal), so wiring a byte source is the
-                  // remaining step. Once bytes are available:
-                  //
-                  //   final userId = AuthRepository.instance.currentUser?.id;
-                  //   if (userId == null) return; // must be signed in
-                  //   final url = await StorageService.uploadAvatar(
-                  //     userId: userId,
-                  //     bytes: pickedBytes,
-                  //   );
-                  //   // then persist url onto profiles.avatar_url and refresh.
-                  //
-                  // Editable text fields (name/bio) already persist through
+                  // For the current user this opens the Edit profile flow
+                  // (display name + bio), which persists through
                   // ProfileRepository.instance.updateProfile.
+                  //
+                  // TODO(avatar-upload): the edit flow can later update the
+                  // avatar via StorageService.uploadAvatar once an image byte
+                  // source is wired (no image_picker dependency is bundled, to
+                  // keep deps minimal).
                   child: OutlinedButton(
-                    onPressed: () {},
+                    onPressed: isCurrentUser ? onEditProfile : null,
                     style: OutlinedButton.styleFrom(
                       foregroundColor: AppColors.primaryText,
                       side: const BorderSide(color: AppColors.border),

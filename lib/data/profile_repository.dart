@@ -1,10 +1,14 @@
 import 'package:flutter/foundation.dart';
 
+import 'dart:convert';
+
 import '../models/conversation.dart';
 import '../models/notification_item.dart';
 import '../models/user_profile.dart';
 import '../supabase_config.dart';
+import 'comment_repository.dart';
 import 'mock_data.dart';
+import 'post_repository.dart';
 
 /// Store for the current user, the known profiles, notifications, and
 /// conversations.
@@ -200,6 +204,137 @@ class ProfileRepository extends ChangeNotifier {
     }
   }
 
+  /// Sets the current user's private-account flag, optimistically in memory and
+  /// then persisted to `profiles.is_private` (fire-and-forget, guarded).
+  ///
+  /// Idempotent: when [isPrivate] already equals the current value nothing
+  /// changes, so no [notifyListeners] fires and no write is attempted (mirrors
+  /// [markNotificationsRead]). This wires the FEAT-002 server-side privacy
+  /// primitive into the client; the server remains the authoritative gate for
+  /// follow requests and content visibility via RLS.
+  void setAccountPrivate(bool isPrivate) {
+    if (_currentUser.isPrivate == isPrivate) return; // idempotent: no-op
+    _currentUser = _currentUser.copyWith(isPrivate: isPrivate);
+    notifyListeners();
+    // ignore: discarded_futures
+    _persistPrivacy(isPrivate);
+  }
+
+  /// Persists `is_private` for the signed-in user to the Supabase `profiles`
+  /// table. Guarded so it never throws into the UI when Supabase is
+  /// unavailable (tests / offline); the optimistic in-memory value stands.
+  Future<void> _persistPrivacy(bool isPrivate) async {
+    try {
+      final id = supabase.auth.currentUser?.id;
+      if (id == null) return;
+      await supabase
+          .from('profiles')
+          .update(<String, dynamic>{'is_private': isPrivate})
+          .eq('id', id);
+    } catch (_) {
+      // Ignore persistence failures; the optimistic in-memory copy stands.
+    }
+  }
+
+  // -- Account data: export + deletion (scaffolding) -----------------------
+
+  /// Assembles a portable export of the signed-in user's in-memory data:
+  /// their [UserProfile], the posts they authored, and the comments they
+  /// wrote. This part is PURE and testable: it reads the already-hydrated
+  /// caches (mock fallback under tests/offline, live rows when Supabase is
+  /// reachable) and returns a serializable [DataExport]; it performs no
+  /// network I/O and never throws.
+  ///
+  /// The [postsBy]/[commentsBy] callbacks let callers inject the current
+  /// post/comment sources (default wiring lives in [exportMyData]) so this
+  /// stays decoupled from the other repositories and unit-testable in
+  /// isolation.
+  DataExport buildDataExport({
+    required List<Map<String, dynamic>> posts,
+    required List<Map<String, dynamic>> comments,
+  }) {
+    final user = _currentUser;
+    return DataExport(
+      generatedAt: DateTime.now(),
+      profile: <String, dynamic>{
+        'id': user.id,
+        'username': user.username,
+        'display_name': user.displayName,
+        'bio': user.bio,
+        'avatar_url': user.avatarUrl,
+        'banner_url': user.bannerUrl,
+        'verified': user.verified,
+        'verification_kind': user.verificationKind,
+        'followers': user.followers,
+        'following': user.following,
+        'is_private': user.isPrivate,
+      },
+      posts: posts,
+      comments: comments,
+    );
+  }
+
+  /// Data-export SCAFFOLDING.
+  ///
+  /// Assembles a real, serializable [DataExport] from the in-memory caches:
+  /// the current user's profile plus the posts they authored (from
+  /// [PostRepository]) and the comments they wrote (from [CommentRepository]).
+  /// This is a genuine, testable payload assembled locally.
+  ///
+  /// ENVIRONMENT CONSTRAINT: a production export would also upload/deliver the
+  /// archive via a server-side privileged operation (e.g. an Edge Function
+  /// packaging Storage objects). No service-role key / reachable Supabase is
+  /// available in this build, so this returns the locally-assembled payload
+  /// only and does not claim server-side delivery.
+  Future<DataExport> exportMyData() async {
+    final myId = _currentUser.id;
+    final posts = PostRepository.instance
+        .forYou()
+        .where((p) => p.author.id == myId)
+        .map((p) => <String, dynamic>{
+              'id': p.id,
+              'content': p.content,
+              'media_url': p.mediaUrl,
+              'media_type': p.mediaType.name,
+              'created_at': p.createdAt.toIso8601String(),
+              'reply_count': p.replyCount,
+              'repost_count': p.repostCount,
+              'like_count': p.likeCount,
+              'view_count': p.viewCount,
+            })
+        .toList();
+    final comments = CommentRepository.instance
+        .allByAuthor(myId)
+        .map((c) => <String, dynamic>{
+              'id': c.id,
+              'post_id': c.postId,
+              'parent_id': c.parentId,
+              'content': c.content,
+              'like_count': c.likeCount,
+              'created_at': c.createdAt.toIso8601String(),
+            })
+        .toList();
+    return buildDataExport(posts: posts, comments: comments);
+  }
+
+  /// Account-deletion SCAFFOLDING.
+  ///
+  /// ENVIRONMENT CONSTRAINT: deleting an account must cascade-delete the
+  /// `auth.users` row, which an RLS-limited client CANNOT do. It requires a
+  /// server-side privileged operation (service-role key or an Edge Function
+  /// calling the Admin API). No such credential / reachable Supabase exists in
+  /// this build, so this deliberately does NOT attempt (and never falsely
+  /// claims) a deletion. It returns an explicit [AccountActionResult]
+  /// indicating the action is a scaffolded stub not available in this build.
+  Future<AccountActionResult> requestAccountDeletion() async {
+    return const AccountActionResult.notAvailable(
+      'Account deletion is not available in this build. It requires a '
+      'server-side privileged operation (service-role key or an Edge Function '
+      'calling the Admin API) to cascade-delete your auth account, which the '
+      'RLS-limited client cannot perform.',
+    );
+  }
+
   // -- Mapping -------------------------------------------------------------
 
   /// Maps a `notifications` row (with a joined actor `profiles` object) to a
@@ -267,6 +402,7 @@ class ProfileRepository extends ChangeNotifier {
       verificationKind: (row['verification_kind'] as String?) ?? 'verified',
       followers: _asInt(row['followers']),
       following: _asInt(row['following']),
+      isPrivate: (row['is_private'] as bool?) ?? false,
     );
   }
 
@@ -275,4 +411,67 @@ class ProfileRepository extends ChangeNotifier {
     if (value is num) return value.toInt();
     return int.tryParse(value?.toString() ?? '') ?? 0;
   }
+}
+
+/// The status of a scaffolded account action (deletion / export).
+enum AccountActionStatus {
+  /// The action completed successfully.
+  success,
+
+  /// The action is scaffolded and cannot run in this build (see the message).
+  notAvailable,
+
+  /// The action failed.
+  failed,
+}
+
+/// An immutable result for a scaffolded account action, rendered by the
+/// settings UI to explain the outcome to the user.
+class AccountActionResult {
+  const AccountActionResult({required this.status, required this.message});
+
+  /// A "scaffolded / not available in this build" result. Used by
+  /// [ProfileRepository.requestAccountDeletion], which cannot perform a live
+  /// deletion without a server-side privileged operation.
+  const AccountActionResult.notAvailable(this.message)
+      : status = AccountActionStatus.notAvailable;
+
+  final AccountActionStatus status;
+  final String message;
+
+  /// Whether the action actually succeeded. False for the scaffolded stub so
+  /// the UI never renders a false success.
+  bool get succeeded => status == AccountActionStatus.success;
+}
+
+/// An immutable, serializable snapshot of the signed-in user's exportable data
+/// (profile + authored posts + authored comments).
+///
+/// This is a real, locally-assembled payload (see
+/// [ProfileRepository.exportMyData]); server-side archive delivery is out of
+/// scope in this build (no service-role key / reachable Supabase).
+class DataExport {
+  const DataExport({
+    required this.generatedAt,
+    required this.profile,
+    required this.posts,
+    required this.comments,
+  });
+
+  final DateTime generatedAt;
+  final Map<String, dynamic> profile;
+  final List<Map<String, dynamic>> posts;
+  final List<Map<String, dynamic>> comments;
+
+  /// A plain map form of the export, suitable for JSON encoding.
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'generated_at': generatedAt.toIso8601String(),
+        'profile': profile,
+        'posts': posts,
+        'comments': comments,
+      };
+
+  /// A pretty-printed JSON string form of the export.
+  String toJsonString() =>
+      const JsonEncoder.withIndent('  ').convert(toJson());
 }

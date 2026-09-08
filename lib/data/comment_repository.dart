@@ -62,6 +62,15 @@ class CommentRepository extends ChangeNotifier {
     return List<Comment>.unmodifiable(list);
   }
 
+  /// All comments authored by [authorId], newest-first. Used by the data-export
+  /// scaffolding to collect the current user's own comments. Returns an
+  /// unmodifiable view; an unknown author yields an empty list.
+  List<Comment> allByAuthor(String authorId) {
+    final list = _comments.where((c) => c.author.id == authorId).toList()
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    return List<Comment>.unmodifiable(list);
+  }
+
   /// Hydrates [_comments] from the Supabase `comments` table (with the joined
   /// author profile). Fire-and-forget; fully guarded so it never throws (e.g.
   /// when Supabase is uninitialized under tests) and only notifies on live
