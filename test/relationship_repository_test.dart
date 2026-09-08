@@ -81,6 +81,25 @@ void main() {
     });
   });
 
+  group('load (guarded, offline)', () {
+    test('is a no-op that never throws and never notifies offline', () async {
+      // Offline/unauthenticated (no reachable Supabase) load() must keep the
+      // mock seed intact and fire no notification. The notify-only-on-change
+      // guard (mapEquals on edges + request equality) additionally suppresses a
+      // redundant notify when a live hydrate matches the current cache.
+      final seededEdge = repo.followStateFor(MockData.citydesk.id);
+      final seededRequests = repo.pendingRequests().map((p) => p.id).toList();
+
+      var notified = 0;
+      repo.addListener(() => notified++);
+      await repo.load();
+
+      expect(notified, 0);
+      expect(repo.followStateFor(MockData.citydesk.id), seededEdge);
+      expect(repo.pendingRequests().map((p) => p.id), seededRequests);
+    });
+  });
+
   group('pendingRequests', () {
     test('reflects the mock seed and is unmodifiable', () {
       final list = repo.pendingRequests();

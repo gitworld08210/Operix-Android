@@ -25,18 +25,28 @@ class ReportValidationError implements Exception {
 /// invariant so an empty [SafetyRepository] never shifts the existing feed
 /// contents/ordering the repository tests assert. Exposed at top-level so
 /// [PostRepository] and the tests can share the exact same logic.
+///
+/// The viewer's OWN posts are always exempt: when [viewerId] is non-null, a
+/// post authored by that id is never hidden, even if the id is (nonsensically)
+/// self-blocked/self-muted or the content matches a muted word. This closes the
+/// v1-review gap where a self-block/self-mute/self-muted-word would silently
+/// drop the author's own posts from their timeline and their data export
+/// (review issues 1 and 4); the post-card overflow menu additionally hides the
+/// safety actions on own-authored posts so the state is never reachable.
 List<Post> filterHidden(
   List<Post> posts, {
   required Set<String> blocked,
   required Set<String> muted,
   Set<String> muteWords = const <String>{},
+  String? viewerId,
 }) {
   if (blocked.isEmpty && muted.isEmpty && muteWords.isEmpty) return posts;
   return posts
       .where((p) =>
-          !blocked.contains(p.author.id) &&
-          !muted.contains(p.author.id) &&
-          !contentMatchesMuteWords(p.content, muteWords))
+          (viewerId != null && p.author.id == viewerId) ||
+          (!blocked.contains(p.author.id) &&
+              !muted.contains(p.author.id) &&
+              !contentMatchesMuteWords(p.content, muteWords)))
       .toList();
 }
 

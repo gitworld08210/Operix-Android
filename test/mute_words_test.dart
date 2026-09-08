@@ -144,5 +144,18 @@ void main() {
       );
       expect(result.map((p) => p.id), <String>['p1', 'p2']);
     });
+
+    test('does not hide the viewer\'s own post matching a muted word', () {
+      // All posts here are authored by 'a'; a self-authored post that matches
+      // a muted word must remain visible to its author (review issues 1 & 4).
+      final result = filterHidden(
+        posts,
+        blocked: const <String>{},
+        muted: const <String>{},
+        muteWords: <String>{'art'},
+        viewerId: 'a',
+      );
+      expect(result.map((p) => p.id), <String>['p1', 'p2', 'p3']);
+    });
   });
 }

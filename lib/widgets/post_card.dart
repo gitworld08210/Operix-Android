@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../data/profile_repository.dart';
 import '../data/safety_repository.dart';
 import '../models/post.dart';
 import '../theme/app_colors.dart';
@@ -49,6 +50,11 @@ class _PostCardState extends State<PostCard> {
   Widget build(BuildContext context) {
     final post = widget.post;
     final author = post.author;
+    // Guard the safety overflow menu the same way the profile screen does
+    // (`if (_isCurrentUser) ... else PopupMenuButton(...)`): a viewer must not
+    // be able to mute/block/report their OWN post. On own-authored posts the
+    // menu collapses to an empty (zero-size) widget so nothing is reachable.
+    final isOwnPost = author.id == ProfileRepository.instance.currentUser.id;
 
     return InkWell(
       onTap: widget.onTap,
@@ -83,7 +89,9 @@ class _PostCardState extends State<PostCard> {
                   _Header(
                     post: post,
                     onAuthorTap: widget.onAuthorTap,
-                    overflow: _PostOverflowMenu(post: post),
+                    overflow: isOwnPost
+                        ? const SizedBox.shrink()
+                        : _PostOverflowMenu(post: post),
                   ),
                   const SizedBox(height: 2),
                   _caption(context),

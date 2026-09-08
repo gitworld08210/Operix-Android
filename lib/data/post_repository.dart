@@ -6,6 +6,7 @@ import '../supabase_config.dart';
 import 'feed_page.dart';
 import 'feed_ranking.dart';
 import 'mock_data.dart';
+import 'profile_repository.dart';
 import 'safety_repository.dart';
 
 /// The post store for the app, backed by Supabase.
@@ -74,6 +75,10 @@ class PostRepository extends ChangeNotifier {
       blocked: safety.blockedIds,
       muted: safety.mutedIds,
       muteWords: safety.muteWordSet,
+      // The viewer's own posts are always visible in their own feed/export,
+      // never hidden by a (self-directed) block/mute/muted-word. See
+      // [filterHidden] and review issues 1 & 4.
+      viewerId: ProfileRepository.instance.currentUser.id,
     );
   }
 

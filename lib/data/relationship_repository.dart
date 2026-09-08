@@ -157,6 +157,14 @@ class RelationshipRepository extends ChangeNotifier {
         );
       }
 
+      // Notify-only-on-real-change: mirror SafetyRepository.load()'s setEquals
+      // guard. Bail out before clearing/refilling/notifying when the hydrated
+      // live rows are identical to what is already cached, so a hydrate that
+      // matches the seed does not trigger a redundant rebuild.
+      final edgesUnchanged = mapEquals(newEdges, _edges);
+      final requestsUnchanged = _requestsEqual(newRequests, _requests);
+      if (edgesUnchanged && requestsUnchanged) return;
+
       _edges
         ..clear()
         ..addAll(newEdges);
@@ -220,6 +228,23 @@ class RelationshipRepository extends ChangeNotifier {
     notifyListeners();
     // ignore: discarded_futures
     _persistDeny(actorId);
+  }
+
+  /// Whether two follow-request lists represent the same pending set. Compared
+  /// order-insensitively and keyed by actor id with the timestamp included, so
+  /// a re-order alone is not treated as a change but a new/removed/moved
+  /// request (or a shifted `createdAt`) is. Used by [load]'s notify-on-change
+  /// guard alongside [mapEquals] on the edges.
+  static bool _requestsEqual(List<FollowRequest> a, List<FollowRequest> b) {
+    if (a.length != b.length) return false;
+    final byActor = <String, DateTime>{
+      for (final r in b) r.actor.id: r.createdAt,
+    };
+    for (final r in a) {
+      final existing = byActor[r.actor.id];
+      if (existing == null || existing != r.createdAt) return false;
+    }
+    return true;
   }
 
   bool _removeRequest(String actorId) {

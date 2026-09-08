@@ -174,5 +174,28 @@ void main() {
       );
       expect(result.map((p) => p.id), <String>['p2']);
     });
+
+    test('never hides the viewer\'s own post even when self-blocked/muted', () {
+      // A (nonsensical) self-block/self-mute must not drop the author's own
+      // post from their own feed — the viewerId exemption keeps it visible.
+      final result = filterHidden(
+        posts,
+        blocked: <String>{'u_aria'},
+        muted: <String>{'u_aria'},
+        viewerId: 'u_aria',
+      );
+      expect(result.map((p) => p.id), <String>['p1', 'p2', 'p3']);
+    });
+
+    test('viewer exemption is scoped: other blocked authors still filtered', () {
+      final result = filterHidden(
+        posts,
+        blocked: <String>{'u_aria', 'u_nova'},
+        muted: const <String>{},
+        viewerId: 'u_aria',
+      );
+      // u_aria is exempt (viewer); u_nova is still removed.
+      expect(result.map((p) => p.id), <String>['p1', 'p3']);
+    });
   });
 }
