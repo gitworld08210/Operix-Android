@@ -50,7 +50,7 @@ class _HomeFeedScreenState extends State<HomeFeedScreen>
             builder: (context, _) {
               final currentUser = ProfileRepository.instance.currentUser;
               return GestureDetector(
-                onTap: () => openProfile(context),
+                onTap: openAppDrawer,
                 child: Center(
                   child: Avatar(
                     url: currentUser?.avatarUrl,

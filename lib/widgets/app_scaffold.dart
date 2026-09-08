@@ -11,6 +11,7 @@ import '../screens/notifications_screen.dart';
 import '../screens/profile_screen.dart';
 import '../screens/search_screen.dart';
 import '../theme/app_colors.dart';
+import 'app_drawer.dart';
 
 /// The app shell: an [IndexedStack] body driven by a bottom [NavigationBar]
 /// with Home / Search / Compose / Notifications / Messages. Compose opens a
@@ -21,6 +22,17 @@ class AppScaffold extends StatefulWidget {
 
   @override
   State<AppScaffold> createState() => _AppScaffoldState();
+}
+
+/// Key on the shell [Scaffold] so nested screens (e.g. the Home feed, which
+/// has its own inner Scaffold + AppBar) can open the shell's navigation
+/// drawer via [openAppDrawer].
+final GlobalKey<ScaffoldState> appShellScaffoldKey = GlobalKey<ScaffoldState>();
+
+/// Opens the app shell's left navigation drawer. Safe to call from nested
+/// screens; no-op if the shell isn't mounted yet.
+void openAppDrawer() {
+  appShellScaffoldKey.currentState?.openDrawer();
 }
 
 class _AppScaffoldState extends State<AppScaffold> {
@@ -55,6 +67,8 @@ class _AppScaffoldState extends State<AppScaffold> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      key: appShellScaffoldKey,
+      drawer: const AppDrawer(),
       body: IndexedStack(index: _index, children: _pages),
       bottomNavigationBar: DecoratedBox(
         decoration: const BoxDecoration(
