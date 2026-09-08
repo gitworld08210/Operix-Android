@@ -1,3 +1,4 @@
+import '../models/comment.dart';
 import '../models/conversation.dart';
 import '../models/notification_item.dart';
 import '../models/post.dart';
@@ -244,6 +245,58 @@ abstract final class MockData {
         .toList();
   }
 
+  // -- Comments ------------------------------------------------------------
+
+  /// Seed comments used by the in-memory [CommentRepository] and the unit
+  /// tests. Keyed by the post ids from [posts]. Threaded replies reference a
+  /// parent comment via [Comment.parentId].
+  static List<Comment> comments() {
+    final now = DateTime.now();
+    return <Comment>[
+      Comment(
+        id: 'cm1',
+        postId: 'p1',
+        author: nova,
+        content: 'The spring curves feel incredible. What damping did you use?',
+        likeCount: 42,
+        createdAt: now.subtract(const Duration(minutes: 9)),
+      ),
+      Comment(
+        id: 'cm2',
+        postId: 'p1',
+        author: marco,
+        parentId: 'cm1',
+        content: 'Seconding this, would love a write-up.',
+        likeCount: 8,
+        createdAt: now.subtract(const Duration(minutes: 6)),
+      ),
+      Comment(
+        id: 'cm3',
+        postId: 'p1',
+        author: jules,
+        content: 'Motion done right is invisible. Nice work.',
+        likeCount: 15,
+        createdAt: now.subtract(const Duration(minutes: 3)),
+      ),
+      Comment(
+        id: 'cm4',
+        postId: 'p2',
+        author: devrel,
+        content: 'Been waiting for this toolkit. Ship it!',
+        likeCount: 21,
+        createdAt: now.subtract(const Duration(minutes: 30)),
+      ),
+      Comment(
+        id: 'cm5',
+        postId: 'p7',
+        author: citydesk,
+        content: 'Skeleton screens changed how we ship dashboards.',
+        likeCount: 63,
+        createdAt: now.subtract(const Duration(hours: 8, minutes: 30)),
+      ),
+    ];
+  }
+
   // -- Notifications -------------------------------------------------------
 
   static List<NotificationItem> notifications() {
@@ -285,6 +338,21 @@ abstract final class MockData {
         actor: jules,
         preview: 'mentioned you in a post',
         createdAt: now.subtract(const Duration(hours: 6)),
+      ),
+      NotificationItem(
+        id: 'n6',
+        type: NotificationType.followRequest,
+        actor: citydesk,
+        preview: 'requested to follow you',
+        createdAt: now.subtract(const Duration(hours: 7)),
+      ),
+      NotificationItem(
+        id: 'n7',
+        type: NotificationType.system,
+        actor: currentUser,
+        preview: 'Your account is now verified.',
+        createdAt: now.subtract(const Duration(hours: 9)),
+        read: true,
       ),
     ];
   }

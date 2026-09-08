@@ -1,7 +1,11 @@
 import 'user_profile.dart';
 
 /// The kind of activity a [NotificationItem] represents.
-enum NotificationType { like, reply, repost, follow, mention }
+///
+/// Mirrors the `type` check constraint on the Supabase `notifications` table
+/// (migration `0002_authz_and_core_tables.sql`), which allows
+/// `('like','reply','repost','follow','mention','follow_request','system')`.
+enum NotificationType { like, reply, repost, follow, mention, followRequest, system }
 
 /// An immutable notification/activity entry.
 class NotificationItem {

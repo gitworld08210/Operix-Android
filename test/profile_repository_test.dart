@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:oneleven/data/profile_repository.dart';
+import 'package:oneleven/models/notification_item.dart';
 
 void main() {
   late ProfileRepository repo;
@@ -39,6 +40,44 @@ void main() {
       for (final n in repo.notifications()) {
         expect(n.read, isTrue);
       }
+    });
+
+    test('markNotificationsRead persistence path stays guarded on mock fallback',
+        () {
+      // With Supabase uninitialized (test/offline), the guarded persistence
+      // helper must be a no-op that never throws, while the in-memory read
+      // state still flips. A second call is idempotent and does not notify
+      // again (nothing left to change).
+      repo.markNotificationsRead();
+      expect(repo.unreadNotifications, 0);
+
+      var notified = 0;
+      repo.addListener(() => notified++);
+      repo.markNotificationsRead();
+      expect(repo.unreadNotifications, 0);
+      // Nothing changed, so no extra notify. (The optimistic-only path still
+      // never throws even though Supabase is unavailable.)
+      expect(notified, 0);
+    });
+
+    test('covers the FEAT-002 notification types including follow_request '
+        'and system', () {
+      final types = repo.notifications().map((n) => n.type).toSet();
+      expect(types.contains(NotificationType.followRequest), isTrue);
+      expect(types.contains(NotificationType.system), isTrue);
+    });
+
+    test('NotificationType covers all seven FEAT-002 types', () {
+      expect(NotificationType.values, hasLength(7));
+      expect(NotificationType.values, containsAll(<NotificationType>[
+        NotificationType.like,
+        NotificationType.reply,
+        NotificationType.repost,
+        NotificationType.follow,
+        NotificationType.mention,
+        NotificationType.followRequest,
+        NotificationType.system,
+      ]));
     });
   });
 

@@ -8,6 +8,7 @@ import '../theme/app_text_styles.dart';
 import '../widgets/app_scaffold.dart';
 import '../widgets/avatar.dart';
 import '../widgets/post_card.dart';
+import 'comments_screen.dart';
 
 /// Home timeline with 'For You' / 'Following' tabs, wired to
 /// [PostRepository.instance].
@@ -115,12 +116,20 @@ class _FeedList extends StatelessWidget {
           onLike: () => repo.toggleLike(post.id),
           onRepost: () => repo.toggleRepost(post.id),
           onBookmark: () => repo.toggleBookmark(post.id),
-          onReply: () => _snack(context, 'Replies are not available in this demo'),
+          onReply: () => _openComments(context, post),
           onShare: () => _snack(context, 'Share sheet coming soon'),
-          onTap: () {},
+          onTap: () => _openComments(context, post),
           onAuthorTap: () {},
         );
       },
+    );
+  }
+
+  void _openComments(BuildContext context, Post post) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => CommentsScreen(post: post),
+      ),
     );
   }
 
