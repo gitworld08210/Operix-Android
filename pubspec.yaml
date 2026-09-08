@@ -22,5 +22,15 @@ dev_dependencies:
     sdk: flutter
   flutter_lints: ^4.0.0
 
+# image_picker (1.1.2) pulls in app_links transitively. app_links >= 6.4.x
+# ships an Android build.gradle that reads the `flutter` Gradle extension
+# (flutter.ndkVersion / minSdkVersion), which only exists under the newest
+# Flutter Gradle plugin; on Flutter 3.24.x this fails with
+# "Could not get unknown property 'flutter' for extension 'android'".
+# Pin app_links to the last 6.3.x, which is compatible with Flutter 3.24's
+# Gradle setup, so the release APK builds.
+dependency_overrides:
+  app_links: 6.3.3
+
 flutter:
   uses-material-design: true
