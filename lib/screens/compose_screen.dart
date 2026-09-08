@@ -11,6 +11,7 @@ import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
 import '../theme/app_theme.dart';
 import '../utils/ids.dart';
+import '../utils/text_entities.dart';
 import '../widgets/avatar.dart';
 
 /// Full-screen compose route. Building a [Post] from the current profile and
@@ -24,6 +25,9 @@ class ComposeScreen extends StatefulWidget {
 
 class _ComposeScreenState extends State<ComposeScreen> {
   final TextEditingController _controller = TextEditingController();
+  // PHASE 4/5 SEAM: a free-text location this phase. A real place-picker /
+  // geocoder (resolving to a place name + lat/lng) replaces this input later.
+  final TextEditingController _locationController = TextEditingController();
   static const int _maxChars = 280;
   int _length = 0;
 
@@ -52,6 +56,7 @@ class _ComposeScreenState extends State<ComposeScreen> {
   @override
   void dispose() {
     _controller.dispose();
+    _locationController.dispose();
     super.dispose();
   }
 
@@ -76,16 +81,28 @@ class _ComposeScreenState extends State<ComposeScreen> {
       for (var i = 0; i < _attachments.length; i++)
         _attachments[i].copyWith(id: '${id}_a$i', postId: id, position: i),
     ];
+    final content = _controller.text.trim();
+    final location = _locationController.text.trim();
     final post = Post(
       id: id,
       author: user,
-      content: _controller.text.trim(),
+      content: content,
       attachments: attachments,
       createdAt: DateTime.now(),
+      // PHASE 4/5 SEAM: free-text location now; a place-picker/geocoder later
+      // resolves lat/lng.
+      location: location.isEmpty ? null : location,
     );
-    // addPost updates the in-memory feed immediately and persists the post
-    // (and its attachments) in the background (fire-and-forget).
-    PostRepository.instance.addPost(post);
+    // Extract the discovery entities from the caption using the SAME grammar
+    // the card linkifier highlights (see utils/text_entities.dart), so the
+    // post_hashtags/post_mentions relations match what the user sees.
+    final hashtags = extractHashtags(content);
+    final mentions = extractMentions(content);
+    // addPost updates the in-memory feed immediately and persists the post,
+    // its attachments, and the extracted relations in the background
+    // (fire-and-forget).
+    PostRepository.instance
+        .addPost(post, hashtags: hashtags, mentions: mentions);
     Navigator.of(context).pop();
   }
 
@@ -261,6 +278,37 @@ class _ComposeScreenState extends State<ComposeScreen> {
                         onRemove: _removeAttachment,
                       ),
                     ],
+                    const SizedBox(height: AppSpacing.md),
+                    // PHASE 4/5 SEAM: a free-text location field. A real
+                    // place-picker/geocoder replaces this later, filling a
+                    // place name + lat/lng.
+                    Row(
+                      children: <Widget>[
+                        const Icon(
+                          Icons.place_outlined,
+                          size: 20,
+                          color: AppColors.accent,
+                        ),
+                        const SizedBox(width: AppSpacing.sm),
+                        Expanded(
+                          child: TextField(
+                            controller: _locationController,
+                            cursorColor: AppColors.accent,
+                            style: AppTextStyles.body,
+                            decoration: InputDecoration(
+                              isDense: true,
+                              filled: false,
+                              border: InputBorder.none,
+                              enabledBorder: InputBorder.none,
+                              focusedBorder: InputBorder.none,
+                              hintText: 'Add location',
+                              hintStyle: AppTextStyles.handle,
+                              contentPadding: EdgeInsets.zero,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ],
                 ),
               ),

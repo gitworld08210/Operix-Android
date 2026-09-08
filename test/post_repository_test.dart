@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:oneleven/data/mock_data.dart';
 import 'package:oneleven/data/post_repository.dart';
+import 'package:oneleven/data/save_repository.dart';
 import 'package:oneleven/models/post.dart';
 import 'package:oneleven/models/post_attachment.dart';
 
@@ -327,6 +328,160 @@ void main() {
       expect(post.kind, PostKind.carousel);
       expect(post.attachments.length, 2);
       expect(post.attachments.first.id, 'a0');
+    });
+  });
+
+  group('react / clearReaction', () {
+    test('sets myReaction and increments the right bucket with one notify', () {
+      final post = firstPost();
+      var notified = 0;
+      repo.addListener(() => notified++);
+
+      final updated = repo.react(post.id, ReactionType.love);
+      expect(updated, isNotNull);
+      expect(updated!.myReaction, ReactionType.love);
+      expect(updated.reactionCounts[ReactionType.love], 1);
+      // A non-like reaction leaves the legacy liked view false.
+      expect(updated.liked, isFalse);
+      expect(notified, 1);
+    });
+
+    test('switching reactions moves the count between buckets', () {
+      final post = firstPost();
+      repo.react(post.id, ReactionType.love);
+      final switched = repo.react(post.id, ReactionType.laugh);
+      expect(switched!.myReaction, ReactionType.laugh);
+      expect(switched.reactionCounts.containsKey(ReactionType.love), isFalse);
+      expect(switched.reactionCounts[ReactionType.laugh], 1);
+    });
+
+    test('clearReaction removes myReaction and empties the bucket', () {
+      final post = firstPost();
+      repo.react(post.id, ReactionType.wow);
+      final cleared = repo.clearReaction(post.id);
+      expect(cleared!.myReaction, isNull);
+      expect(cleared.reactionCounts.containsKey(ReactionType.wow), isFalse);
+    });
+
+    test('react to the same type again is a no-op (no bucket growth)', () {
+      final post = firstPost();
+      repo.react(post.id, ReactionType.sad);
+      final again = repo.react(post.id, ReactionType.sad);
+      expect(again!.reactionCounts[ReactionType.sad], 1);
+    });
+
+    test('returns null for an unknown id', () {
+      expect(repo.react('nope', ReactionType.like), isNull);
+      expect(repo.clearReaction('nope'), isNull);
+    });
+  });
+
+  group('toggleLike via the react wrapper', () {
+    test('still flips liked and moves likeCount +/-1', () {
+      final post = firstPost();
+      final startLiked = post.liked;
+      final startCount = post.likeCount;
+
+      final afterFirst = repo.toggleLike(post.id);
+      expect(afterFirst!.liked, !startLiked);
+      expect(afterFirst.likeCount, startCount + (!startLiked ? 1 : -1));
+      // The wrapper routes through the like reaction bucket.
+      expect(afterFirst.myReaction, afterFirst.liked ? ReactionType.like : null);
+
+      final afterSecond = repo.toggleLike(post.id);
+      expect(afterSecond!.liked, startLiked);
+      expect(afterSecond.likeCount, startCount);
+    });
+
+    test('tapping like while a non-like reaction is set switches to like', () {
+      final post = firstPost();
+      // Normalize to a known "no reaction" baseline so the assertions do not
+      // depend on the seed's initial like state.
+      repo.clearReaction(post.id);
+      final baseCount = repo.forYou().firstWhere((p) => p.id == post.id).likeCount;
+      repo.react(post.id, ReactionType.love);
+      final liked = repo.toggleLike(post.id);
+      expect(liked!.myReaction, ReactionType.like);
+      expect(liked.liked, isTrue);
+      // love -> like: the like bucket gains 1 over the no-reaction baseline.
+      expect(liked.likeCount, baseCount + 1);
+      expect(liked.reactionCounts.containsKey(ReactionType.love), isFalse);
+    });
+  });
+
+  group('mapPostRow reactions + location', () {
+    test('populates reactionCounts from a grouped reactions join', () {
+      final row = _row('p1')
+        ..['reactions'] = <Map<String, dynamic>>[
+          <String, dynamic>{'type': 'like', 'count': 3},
+          <String, dynamic>{'type': 'love', 'count': 2},
+        ];
+      final post = PostRepository.mapPostRow(row);
+      expect(post.reactionCounts[ReactionType.like], 3);
+      expect(post.reactionCounts[ReactionType.love], 2);
+    });
+
+    test('populates reactionCounts from a reaction_counts map', () {
+      final row = _row('p1')
+        ..['reaction_counts'] = <String, dynamic>{'laugh': 5};
+      final post = PostRepository.mapPostRow(row);
+      expect(post.reactionCounts[ReactionType.laugh], 5);
+    });
+
+    test('stays empty when no reactions join is present', () {
+      final post = PostRepository.mapPostRow(_row('p1'));
+      expect(post.reactionCounts, isEmpty);
+      expect(post.myReaction, isNull);
+      expect(post.liked, isFalse);
+    });
+
+    test('hydrates myReaction from an explicit viewer reaction field', () {
+      final row = _row('p1')..['my_reaction'] = 'love';
+      final post = PostRepository.mapPostRow(row);
+      expect(post.myReaction, ReactionType.love);
+      expect(post.liked, isFalse);
+    });
+
+    test('legacy likedIds still hydrates myReaction=like', () {
+      final post = PostRepository.mapPostRow(
+        _row('p1'),
+        likedIds: <String>{'p1'},
+      );
+      expect(post.myReaction, ReactionType.like);
+      expect(post.liked, isTrue);
+    });
+
+    test('maps optional location/lat/lng from the row', () {
+      final row = _row('p1')
+        ..['location'] = 'Lisbon'
+        ..['lat'] = 38.72
+        ..['lng'] = -9.13;
+      final post = PostRepository.mapPostRow(row);
+      expect(post.location, 'Lisbon');
+      expect(post.lat, 38.72);
+      expect(post.lng, -9.13);
+    });
+  });
+
+  group('toggleBookmark drives SaveRepository', () {
+    test('flips bookmarked (via SaveRepository) without touching counts', () {
+      final post = firstPost();
+      final startSaved = SaveRepository.instance.isSaved(post.id);
+      final startLikeCount = post.likeCount;
+
+      final updated = repo.toggleBookmark(post.id);
+      expect(updated, isNotNull);
+      expect(updated!.bookmarked, !startSaved);
+      expect(SaveRepository.instance.isSaved(post.id), !startSaved);
+      expect(updated.likeCount, startLikeCount);
+
+      final reverted = repo.toggleBookmark(post.id);
+      expect(reverted!.bookmarked, startSaved);
+      expect(SaveRepository.instance.isSaved(post.id), startSaved);
+    });
+
+    test('returns null for an unknown id', () {
+      expect(repo.toggleBookmark('nope'), isNull);
     });
   });
 }

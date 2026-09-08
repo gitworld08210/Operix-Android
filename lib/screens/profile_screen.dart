@@ -481,6 +481,8 @@ class _PostsTab extends StatelessWidget {
         return PostCard(
           post: post,
           onLike: () => repo.toggleLike(post.id),
+          onReact: (type) => repo.react(post.id, type),
+          onClearReaction: () => repo.clearReaction(post.id),
           onRepost: () => repo.toggleRepost(post.id),
           onBookmark: () => repo.toggleBookmark(post.id),
         );

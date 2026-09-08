@@ -200,6 +200,8 @@ class _FeedListState extends State<_FeedList> {
         return PostCard(
           post: post,
           onLike: () => repo.toggleLike(post.id),
+          onReact: (type) => repo.react(post.id, type),
+          onClearReaction: () => repo.clearReaction(post.id),
           onRepost: () => repo.toggleRepost(post.id),
           onBookmark: () => repo.toggleBookmark(post.id),
           onReply: () => _openComments(context, post),

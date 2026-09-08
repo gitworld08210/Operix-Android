@@ -124,6 +124,12 @@ abstract final class MockData {
   /// writes this list; it is client-authoritative and in-memory only.
   static Set<String> muteWords() => <String>{};
 
+  /// Seed set of post ids the current user has SAVED/bookmarked. Deliberately
+  /// EMPTY so an empty [SaveRepository] leaves the default feed unchanged
+  /// (existing bookmark/feed assertions must not shift). Saves are server-backed
+  /// (public.saves); this is only the offline/mock seed.
+  static Set<String> savedPostIds() => <String>{};
+
   // -- Relationships (follow edges / requests) -----------------------------
 
   /// Seed of the current user's OUTGOING follow edges, keyed by followee id

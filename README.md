@@ -115,6 +115,55 @@ Instagram-style **stories** live at the top of the home feed:
 > plus a **scheduled sweep** of expired rows (a later ops concern). Treat live
 > expiry/RLS behavior as the largest known risk for this feature.
 
+## Discovery relations (saves, reactions, hashtags, mentions, location)
+
+First-class, **indexed** relations that make a later search/discovery phase
+cheap (migration `0007_relations.sql`):
+
+- **Saves / bookmarks (server-backed).** `SaveRepository` is a `ChangeNotifier`
+  singleton over an in-memory set seeded EMPTY from `MockData.savedPostIds()`,
+  exposing synchronous `isSaved` / `savedIds` and an optimistic single-notify
+  `toggleSave` that persists to `public.saves` (keyed by `(user_id, post_id)`)
+  via a guarded fire-and-forget helper — the same offline-no-op pattern as the
+  other repos. `PostRepository.toggleBookmark` and the `PostCard` bookmark
+  action now drive it (the card reflects `SaveRepository.isSaved`). Indexed by
+  `idx_saves_user (user_id, created_at desc)` for a "my saves" screen.
+- **Richer reactions.** A `ReactionType` of `{like, love, laugh, wow, sad,
+  angry}`; `Post` carries a server-owned `reactionCounts` map plus the viewer's
+  `myReaction`. The legacy `liked` / `likeCount` surface is kept as a
+  **compatibility view** under the **like-implies-liked** rule
+  (`liked == (myReaction == like)`). `PostRepository.react` / `clearReaction`
+  persist to `public.reactions`; `toggleLike` is a thin wrapper over them so the
+  quick like/unlike tap is unchanged. `PostCard` adds a **6-type reaction
+  picker** via **long-press** on the like button (a plain tap stays quick
+  like/unlike). Indexed by `idx_reactions_post_type (post_id, type)`.
+- **Hashtags + mentions (indexed).** A pure, tested extractor
+  (`utils/text_entities.dart`) parses `#hashtags` / `@mentions` from the caption
+  using the SAME grammar the `PostCard` linkifier highlights (normalized,
+  lower-cased, de-duped). On compose these feed `public.hashtags` +
+  `public.post_hashtags` and `public.post_mentions`, indexed by
+  `idx_post_hashtags_hashtag` ("posts for #tag") and `idx_post_mentions_user`
+  ("posts mentioning me").
+- **Location tags.** Compose has an optional **free-text location** field;
+  `posts.location` (+ optional `lat`/`lng`) is added with a partial
+  `idx_posts_location`. A real place-picker / geocoder is a **Phase 4/5 seam**
+  (marked in code); this phase is free text only.
+
+> **Reactions-vs-likes coexistence (no double-counting).** `public.reactions`
+> is the general table and the ONLY client-writable reaction store for all six
+> types **including `like`**. `posts.like_count` is recomputed from
+> `reactions where type='like'` by the new `sync_post_reaction_like_count`
+> trigger. The 0001 `public.likes` table and its `sync_post_like_count` trigger
+> are left **untouched but dormant** (the client no longer writes `likes`), so
+> `like_count` has exactly one writer going forward — there is no
+> double-counting. See the head comment of `0007_relations.sql`.
+>
+> **ENV RISK (largest known risk).** `0007_relations.sql` is **UNVERIFIED**
+> against a live Supabase project (no reachable/administerable instance, no
+> service-role key here) — it has had **structural review only**. Live RLS
+> enforcement, the reaction-count trigger, FK/uniqueness constraints, and index
+> creation must be validated on a real project before relying on them.
+
 ## Web-only surfaces (excluded from Android)
 
 **Ads Manager** and **Admin-OS** are **web-only** and are intentionally **not** part of this Android Flutter app. They remain in the React/Vite web project only.

@@ -17,6 +17,15 @@ enum MediaType { none, image, video }
 /// two can never disagree.
 enum PostKind { text, image, carousel, video }
 
+/// A typed reaction a viewer can leave on a [Post].
+///
+/// Generalizes the single like into six affect types. [like] is special: it is
+/// the compatibility bridge to the legacy `liked`/`likeCount` surface (see
+/// [Post.liked] and the like-implies-liked rule documented there). The server
+/// owns the per-type counts via a trigger on `public.reactions` (see migration
+/// `0007_relations.sql`); the client never writes them.
+enum ReactionType { like, love, laugh, wow, sad, angry }
+
 /// Derives the [PostKind] from an ordered [attachments] list.
 ///
 /// Contract (the single source of truth so `kind` and `attachments` never
@@ -45,6 +54,16 @@ PostKind deriveKind(List<PostAttachment> attachments) {
 /// preserved and computed from `attachments.first`, so existing consumers and
 /// tests that read a single media slot keep compiling and behave identically
 /// for single-media posts. New code should prefer [kind] + [attachments].
+///
+/// REACTIONS: a post carries a per-type [reactionCounts] map plus the viewer's
+/// own [myReaction] (null when the viewer has not reacted). These GENERALIZE
+/// the single like WITHOUT removing [likeCount]: the server still owns the
+/// denormalized aggregate like counter (see `sync_post_reaction_like_count` in
+/// `0007_relations.sql`), so [likeCount] stays authoritative for the total like
+/// count. The legacy [liked] flag is a COMPATIBILITY VIEW over [myReaction]
+/// under the LIKE-IMPLIES-LIKED rule: `liked == (myReaction == ReactionType.like)`.
+/// Construct a post with `liked: true` and it seeds `myReaction = like`; pass a
+/// non-like [myReaction] and [liked] reads false.
 class Post {
   Post({
     required this.id,
@@ -58,14 +77,24 @@ class Post {
     this.repostCount = 0,
     this.likeCount = 0,
     this.viewCount = 0,
-    this.liked = false,
+    bool liked = false,
+    ReactionType? myReaction,
+    this.reactionCounts = const <ReactionType, int>{},
     this.reposted = false,
     this.bookmarked = false,
+    this.location,
+    this.lat,
+    this.lng,
   })  : attachments = attachments ??
             _legacyAttachments(id, mediaUrl, mediaType),
         kind = deriveKind(
           attachments ?? _legacyAttachments(id, mediaUrl, mediaType),
-        );
+        ),
+        // LIKE-IMPLIES-LIKED: a `liked: true` with no explicit reaction seeds a
+        // `like`; an explicit myReaction always wins so callers can set love /
+        // laugh / etc. directly.
+        myReaction =
+            myReaction ?? (liked ? ReactionType.like : null);
 
   /// Builds a single-attachment list from the legacy `mediaUrl`/`mediaType`
   /// pair when no explicit [attachments] list is supplied. Returns an empty
@@ -107,11 +136,39 @@ class Post {
   final DateTime createdAt;
   final int replyCount;
   final int repostCount;
+
+  /// The server-owned aggregate LIKE count. Owned by a database trigger, not
+  /// the client (see [Post] doc + `0007_relations.sql`). Reactions other than
+  /// `like` are tallied separately in [reactionCounts].
   final int likeCount;
   final int viewCount;
-  final bool liked;
+
+  /// The viewer's own reaction, or null when they have not reacted.
+  final ReactionType? myReaction;
+
+  /// The server-owned per-type reaction counts (empty by default). Keys are
+  /// only present for types with a non-zero count. The client never writes
+  /// these; a trigger maintains them.
+  final Map<ReactionType, int> reactionCounts;
+
   final bool reposted;
   final bool bookmarked;
+
+  /// Optional free-text location tag for the post (Phase 3 is free text; a real
+  /// place-picker/geocoder is a Phase 4/5 seam — see `compose_screen.dart`).
+  final String? location;
+
+  /// Optional coordinates for the [location] (populated by a future geocoder).
+  final double? lat;
+  final double? lng;
+
+  /// Legacy compatibility VIEW: whether the viewer has LIKED this post.
+  ///
+  /// Under the LIKE-IMPLIES-LIKED rule this is true exactly when the viewer's
+  /// [myReaction] is [ReactionType.like]. A non-like reaction (love/laugh/…)
+  /// therefore reads `liked == false`, matching the legacy single-like surface
+  /// the like button + existing tests rely on.
+  bool get liked => myReaction == ReactionType.like;
 
   // -- Legacy single-media compatibility shim (over attachments.first) -----
 
@@ -142,9 +199,25 @@ class Post {
     int? likeCount,
     int? viewCount,
     bool? liked,
+    ReactionType? myReaction,
+    bool clearMyReaction = false,
+    Map<ReactionType, int>? reactionCounts,
     bool? reposted,
     bool? bookmarked,
+    String? location,
+    double? lat,
+    double? lng,
   }) {
+    // Resolve the viewer's reaction: an explicit `myReaction` wins; else a
+    // `liked` flag maps to like/none under LIKE-IMPLIES-LIKED; else carry the
+    // current reaction. `clearMyReaction` forces it to null (needed because a
+    // null `myReaction` arg is indistinguishable from "unchanged").
+    final ReactionType? resolvedReaction = clearMyReaction
+        ? null
+        : myReaction ??
+            (liked != null
+                ? (liked ? ReactionType.like : null)
+                : this.myReaction);
     return Post(
       id: id ?? this.id,
       author: author ?? this.author,
@@ -156,9 +229,13 @@ class Post {
       repostCount: repostCount ?? this.repostCount,
       likeCount: likeCount ?? this.likeCount,
       viewCount: viewCount ?? this.viewCount,
-      liked: liked ?? this.liked,
+      myReaction: resolvedReaction,
+      reactionCounts: reactionCounts ?? this.reactionCounts,
       reposted: reposted ?? this.reposted,
       bookmarked: bookmarked ?? this.bookmarked,
+      location: location ?? this.location,
+      lat: lat ?? this.lat,
+      lng: lng ?? this.lng,
     );
   }
 

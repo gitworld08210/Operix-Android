@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../data/profile_repository.dart';
 import '../data/safety_repository.dart';
+import '../data/save_repository.dart';
 import '../models/post.dart';
 import '../models/post_attachment.dart';
 import '../theme/app_colors.dart';
@@ -13,6 +14,19 @@ import 'avatar.dart';
 import 'report_sheet.dart';
 import 'verified_badge.dart';
 
+/// Display metadata for the 6 reaction types: the picker emoji glyph and a
+/// short label (used for the tooltip). The ordering here is the order shown in
+/// the long-press picker popover.
+const Map<ReactionType, ({String emoji, String label})> kReactionDisplay =
+    <ReactionType, ({String emoji, String label})>{
+  ReactionType.like: (emoji: '👍', label: 'Like'),
+  ReactionType.love: (emoji: '❤️', label: 'Love'),
+  ReactionType.laugh: (emoji: '😂', label: 'Haha'),
+  ReactionType.wow: (emoji: '😮', label: 'Wow'),
+  ReactionType.sad: (emoji: '😢', label: 'Sad'),
+  ReactionType.angry: (emoji: '😡', label: 'Angry'),
+};
+
 /// A stateless PostCard mirroring the web PostCard: avatar column + content
 /// column, a header row, linkified caption with 'Show more', optional rounded
 /// media, and the full modern-X action row. All state changes are driven by
@@ -22,6 +36,8 @@ class PostCard extends StatefulWidget {
     super.key,
     required this.post,
     this.onLike,
+    this.onReact,
+    this.onClearReaction,
     this.onRepost,
     this.onBookmark,
     this.onReply,
@@ -31,7 +47,17 @@ class PostCard extends StatefulWidget {
   });
 
   final Post post;
+
+  /// Quick like/unlike: a plain TAP on the like button (unchanged behavior).
   final VoidCallback? onLike;
+
+  /// Applies a specific reaction, invoked from the long-press picker.
+  final void Function(ReactionType type)? onReact;
+
+  /// Clears the viewer's reaction, invoked when the picker's currently-selected
+  /// reaction is tapped again.
+  final VoidCallback? onClearReaction;
+
   final VoidCallback? onRepost;
   final VoidCallback? onBookmark;
   final VoidCallback? onReply;
@@ -189,14 +215,11 @@ class _PostCardState extends State<PostCard> {
           onTap: widget.onRepost,
           tooltip: 'Repost',
         ),
-        ActionButton(
-          icon: Icons.favorite_border,
-          activeIcon: Icons.favorite,
-          count: post.likeCount,
-          active: post.liked,
-          activeColor: AppColors.like,
-          onTap: widget.onLike,
-          tooltip: 'Like',
+        _LikeReactionButton(
+          post: post,
+          onLike: widget.onLike,
+          onReact: widget.onReact,
+          onClearReaction: widget.onClearReaction,
         ),
         ActionButton(
           icon: Icons.bar_chart,
@@ -207,13 +230,16 @@ class _PostCardState extends State<PostCard> {
         Row(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            ActionButton(
-              icon: Icons.bookmark_border,
-              activeIcon: Icons.bookmark,
-              active: post.bookmarked,
-              activeColor: AppColors.accent,
-              onTap: widget.onBookmark,
-              tooltip: 'Bookmark',
+            AnimatedBuilder(
+              animation: SaveRepository.instance,
+              builder: (context, _) => ActionButton(
+                icon: Icons.bookmark_border,
+                activeIcon: Icons.bookmark,
+                active: SaveRepository.instance.isSaved(post.id),
+                activeColor: AppColors.accent,
+                onTap: widget.onBookmark,
+                tooltip: 'Bookmark',
+              ),
             ),
             ActionButton(
               icon: Icons.ios_share,
@@ -224,6 +250,155 @@ class _PostCardState extends State<PostCard> {
           ],
         ),
       ],
+    );
+  }
+}
+
+/// The like button + its 6-type reaction picker.
+///
+/// A PLAIN TAP is the unchanged quick like/unlike (drives [onLike]). A
+/// LONG-PRESS opens a small horizontal popover of the 6 reaction emojis
+/// (ordered per [kReactionDisplay]); tapping one applies it via [onReact],
+/// tapping the currently-selected reaction clears it via [onClearReaction]. The
+/// button reflects the viewer's current [Post.myReaction]: a non-`like`
+/// reaction shows its emoji glyph + label color; `like`/none keep the classic
+/// heart. The action-row layout is unchanged (this replaces exactly the single
+/// like [ActionButton]).
+class _LikeReactionButton extends StatelessWidget {
+  const _LikeReactionButton({
+    required this.post,
+    this.onLike,
+    this.onReact,
+    this.onClearReaction,
+  });
+
+  final Post post;
+  final VoidCallback? onLike;
+  final void Function(ReactionType type)? onReact;
+  final VoidCallback? onClearReaction;
+
+  @override
+  Widget build(BuildContext context) {
+    final reaction = post.myReaction;
+    final hasNonLikeReaction =
+        reaction != null && reaction != ReactionType.like;
+
+    return GestureDetector(
+      onLongPress: () => _openPicker(context),
+      child: hasNonLikeReaction
+          ? _reactionGlyphButton(reaction)
+          : ActionButton(
+              icon: Icons.favorite_border,
+              activeIcon: Icons.favorite,
+              count: post.likeCount,
+              active: post.liked,
+              activeColor: AppColors.like,
+              onTap: onLike,
+              tooltip: 'Like (long-press to react)',
+            ),
+    );
+  }
+
+  /// The like button rendered as the chosen non-like reaction: its emoji glyph
+  /// plus the like count, colored active. Tapping it clears the reaction (so a
+  /// plain tap still toggles the reaction off, mirroring the quick-like tap).
+  Widget _reactionGlyphButton(ReactionType reaction) {
+    final display = kReactionDisplay[reaction]!;
+    return Tooltip(
+      message: '${display.label} (long-press to change)',
+      child: InkWell(
+        onTap: onClearReaction,
+        borderRadius: BorderRadius.circular(999),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Text(display.emoji, style: const TextStyle(fontSize: 16)),
+              if (post.likeCount > 0) ...<Widget>[
+                const SizedBox(width: 6),
+                Text(
+                  fmtCount(post.likeCount),
+                  style: const TextStyle(
+                    color: AppColors.like,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w400,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openPicker(BuildContext context) async {
+    final selected = await showDialog<ReactionType>(
+      context: context,
+      barrierColor: Colors.transparent,
+      builder: (context) => _ReactionPickerOverlay(current: post.myReaction),
+    );
+    if (selected == null) return;
+    if (selected == post.myReaction) {
+      onClearReaction?.call();
+    } else {
+      onReact?.call(selected);
+    }
+  }
+}
+
+/// A small centered horizontal popover of the 6 reaction emojis. Returns the
+/// tapped [ReactionType] (or null when dismissed). The currently-selected
+/// reaction is highlighted so tapping it again reads as a clear.
+class _ReactionPickerOverlay extends StatelessWidget {
+  const _ReactionPickerOverlay({this.current});
+
+  final ReactionType? current;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Material(
+        color: Colors.transparent,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          decoration: BoxDecoration(
+            color: AppColors.surface,
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: AppColors.border, width: 0.5),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              for (final entry in kReactionDisplay.entries)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: Tooltip(
+                    message: entry.value.label,
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(999),
+                      onTap: () => Navigator.of(context).pop(entry.key),
+                      child: Container(
+                        padding: const EdgeInsets.all(6),
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: entry.key == current
+                              ? AppColors.accent.withValues(alpha: 0.18)
+                              : Colors.transparent,
+                        ),
+                        child: Text(
+                          entry.value.emoji,
+                          style: const TextStyle(fontSize: 26),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
