@@ -171,6 +171,57 @@ the same way (SQL Editor → New query → paste → Run). It **must be applied 
 > its live application and runtime RLS/trigger behavior have **not** been
 > executed. Apply and exercise it against a real project before relying on it.
 
+### Phase 2 client wiring (privacy, safety, follow requests, mute words)
+
+Phase 2 wires the FEAT-002 server primitives into the Flutter client. Each
+piece keeps the repository contract (synchronous getters over a `MockData`
+seed, optimistic single-notify mutations, guarded fire-and-forget persistence)
+and is covered by pure unit tests.
+
+- **Private-account toggle.** `SettingsScreen` exposes a "Private account"
+  switch bound to `ProfileRepository.setAccountPrivate`, which flips
+  `currentUser.isPrivate` optimistically and persists `profiles.is_private`
+  (guarded).
+- **Block / mute / report.** `SafetyRepository` owns the viewer's blocked and
+  muted account sets and abuse reports. Blocks persist to `public.blocks`
+  (insert/delete keyed by `blocker = auth.uid()`); mutes are
+  client-authoritative (in-memory, private "hide from my feed"); reports insert
+  into `public.reports`. A pure `filterHidden` helper hides blocked/muted
+  authors from the feed and is identity on empty sets. Post/profile overflow
+  menus drive these actions and a Privacy & Safety settings section manages the
+  blocked/muted lists.
+- **Follow-request flow (`pending` → `accepted`).** `RelationshipRepository`
+  owns the viewer's outgoing follow edges and incoming pending requests. A
+  follow of a **public** account is created as `FollowState.following` (server
+  row `status = 'accepted'`); a follow of a **private** account is created as
+  `FollowState.requested` (server row `status = 'pending'`) and later flipped
+  to `accepted` by the followee. The profile "Follow" button reflects
+  **Follow / Requested / Following** and shows a lock affordance for private
+  accounts; a private account's tab content is gated behind a "This account is
+  private" empty-state until the follow is accepted. Follow-request
+  notifications render **Accept / Deny** buttons wired to
+  `acceptFollowRequest` / `denyFollowRequest` (guarded update / delete on
+  `public.follows`). Notifications now hydrate from the `notifications` table
+  (mock fallback preserved).
+- **Keyword / mute-word filtering** (a product differentiator). `SafetyRepository`
+  holds a persisted-in-memory, normalized (trimmed + lower-cased + de-duped)
+  mute-words list managed from a Settings **"Muted words"** screen. A pure
+  `contentMatchesMuteWords` matcher is case-insensitive and respects **word
+  boundaries** (muting `art` hides "the art show" but not "startup"); it is
+  composed into the feed filter so matching posts are hidden while empty word
+  sets keep the feed a pure pass-through.
+
+> **Live Supabase behavior is UNVERIFIED in this environment.** There is no
+> reachable/administerable Supabase project and no service-role key in this
+> sandbox, so the live enforcement of these features has **not** been executed:
+> the `follows.status` `pending` → `accepted` transitions, the
+> `can_view_profile` visibility gate for private accounts (the client "private
+> account" gate and the mute filter are OPTIMISTIC UX mirrors; the server is the
+> true gate), and the follow-accept notification trigger (migration 0003) all
+> remain to be exercised against a real project. All client persistence is
+> guarded and no-ops cleanly offline; verification here is limited to
+> `flutter analyze` + `flutter test` on the mock-fallback path.
+
 **Storage read model:** both buckets are intentionally `public: true`. The app
 loads media with plain URL fetches (`Image.network`, video URLs) using
 `getPublicUrl()`, which serves objects over the public CDN path. Because that
@@ -255,12 +306,15 @@ flow used here.
 
 **Still mock (`lib/data/mock_data.dart`):**
 
-- Notifications (`ProfileRepository.notifications()` / `unreadNotifications` /
-  `markNotificationsRead`) — the `notifications` table + producer triggers exist
-  after migration 0002, but the Dart client still reads from mock data; wiring
-  the repository to the table lands in a later increment.
 - Conversations / direct messages (`conversations()` / `unreadMessages` /
   `conversationById`) — no messaging table yet.
+
+> Notifications now hydrate from the `notifications` table (with a mock
+> fallback), and follow requests / blocks / follow edges persist to
+> `public.follows` / `public.blocks`. Mute accounts and mute words remain
+> client-authoritative in-memory (no server table this phase). See
+> **Phase 2 client wiring** above for the full live-vs-mock breakdown and the
+> unverified-live-Supabase caveat.
 
 **Graceful fallback:** the repositories seed their in-memory caches from
 `MockData` at construction and hydrate from Supabase asynchronously
@@ -287,6 +341,9 @@ Pure logic is covered by unit tests under `test/` (run with `flutter test`):
 - `test/format_test.dart` — `fmtCount` K/M/B thresholds and trailing-`.0` trimming; `timeAgo` buckets (`now` / `m` / `h` / `d` / short date).
 - `test/post_repository_test.dart` — `forYou` ordering, `following` filtering, `toggleLike` / `toggleRepost` / `toggleBookmark` flipping state and adjusting counts, and `addPost` prepending.
 - `test/profile_repository_test.dart` — notification/conversation ordering, unread counts, `markNotificationsRead`, and `updateProfile`.
+- `test/safety_repository_test.dart` — block/mute idempotence + single-notify, report validation, and the pure `filterHidden` feed filter (identity on empty sets).
+- `test/relationship_repository_test.dart` — the `follow` status decision (public → following, private → requested), `unfollow`, `acceptFollowRequest` / `denyFollowRequest` removing pending requests, all single-notify + idempotent.
+- `test/mute_words_test.dart` — the pure `contentMatchesMuteWords` matcher (case-insensitive, word-boundary aware, empty set matches nothing), `addMuteWord` / `removeMuteWord` normalize + de-dupe + notify-once, and mute-word feed hiding via `filterHidden`.
 
 Like the rest of the project, these were authored by hand and have not been executed in-sandbox (no Dart toolchain); run `flutter test` on a Flutter-equipped machine.
 

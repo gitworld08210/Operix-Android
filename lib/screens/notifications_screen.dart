@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../data/profile_repository.dart';
+import '../data/relationship_repository.dart';
 import '../models/notification_item.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
@@ -31,16 +32,35 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
         ],
       ),
       body: AnimatedBuilder(
-        animation: ProfileRepository.instance,
+        animation: Listenable.merge(<Listenable>[
+          ProfileRepository.instance,
+          RelationshipRepository.instance,
+        ]),
         builder: (context, _) {
           final items = ProfileRepository.instance.notifications();
           if (items.isEmpty) {
             return const _EmptyNotifications();
           }
+          final pendingIds = RelationshipRepository.instance
+              .pendingRequests()
+              .map((p) => p.id)
+              .toSet();
           return ListView.separated(
             itemCount: items.length,
             separatorBuilder: (_, __) => const Divider(height: 0.5),
-            itemBuilder: (context, index) => _NotificationTile(item: items[index]),
+            itemBuilder: (context, index) {
+              final item = items[index];
+              final isPending = item.type == NotificationType.followRequest &&
+                  pendingIds.contains(item.actor.id);
+              return _NotificationTile(
+                item: item,
+                requestPending: isPending,
+                onAccept: () => RelationshipRepository.instance
+                    .acceptFollowRequest(item.actor.id),
+                onDeny: () => RelationshipRepository.instance
+                    .denyFollowRequest(item.actor.id),
+              );
+            },
           );
         },
       ),
@@ -80,9 +100,20 @@ class _EmptyNotifications extends StatelessWidget {
 }
 
 class _NotificationTile extends StatelessWidget {
-  const _NotificationTile({required this.item});
+  const _NotificationTile({
+    required this.item,
+    this.requestPending = false,
+    this.onAccept,
+    this.onDeny,
+  });
 
   final NotificationItem item;
+
+  /// Whether this is a follow-request notification whose request is still
+  /// pending (drives the Accept/Deny affordances).
+  final bool requestPending;
+  final VoidCallback? onAccept;
+  final VoidCallback? onDeny;
 
   IconData get _typeIcon {
     switch (item.type) {
@@ -166,6 +197,34 @@ class _NotificationTile extends StatelessWidget {
                 ),
                 const SizedBox(height: 2),
                 Text(timeAgo(item.createdAt), style: AppTextStyles.caption),
+                if (item.type == NotificationType.followRequest) ...<Widget>[
+                  const SizedBox(height: AppSpacing.sm),
+                  if (requestPending)
+                    Row(
+                      children: <Widget>[
+                        FilledButton(
+                          onPressed: onAccept,
+                          style: FilledButton.styleFrom(
+                            backgroundColor: AppColors.accent,
+                            visualDensity: VisualDensity.compact,
+                          ),
+                          child: const Text('Accept'),
+                        ),
+                        const SizedBox(width: AppSpacing.sm),
+                        OutlinedButton(
+                          onPressed: onDeny,
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: AppColors.primaryText,
+                            side: const BorderSide(color: AppColors.border),
+                            visualDensity: VisualDensity.compact,
+                          ),
+                          child: const Text('Deny'),
+                        ),
+                      ],
+                    )
+                  else
+                    Text('Request handled', style: AppTextStyles.caption),
+                ],
               ],
             ),
           ),

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../data/profile_repository.dart';
+import '../data/safety_repository.dart';
 import '../models/post.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
@@ -7,6 +9,7 @@ import '../theme/app_theme.dart';
 import '../utils/format.dart';
 import 'action_button.dart';
 import 'avatar.dart';
+import 'report_sheet.dart';
 import 'verified_badge.dart';
 
 /// A stateless PostCard mirroring the web PostCard: avatar column + content
@@ -47,6 +50,11 @@ class _PostCardState extends State<PostCard> {
   Widget build(BuildContext context) {
     final post = widget.post;
     final author = post.author;
+    // Guard the safety overflow menu the same way the profile screen does
+    // (`if (_isCurrentUser) ... else PopupMenuButton(...)`): a viewer must not
+    // be able to mute/block/report their OWN post. On own-authored posts the
+    // menu collapses to an empty (zero-size) widget so nothing is reachable.
+    final isOwnPost = author.id == ProfileRepository.instance.currentUser.id;
 
     return InkWell(
       onTap: widget.onTap,
@@ -78,7 +86,13 @@ class _PostCardState extends State<PostCard> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
-                  _Header(post: post, onAuthorTap: widget.onAuthorTap),
+                  _Header(
+                    post: post,
+                    onAuthorTap: widget.onAuthorTap,
+                    overflow: isOwnPost
+                        ? const SizedBox.shrink()
+                        : _PostOverflowMenu(post: post),
+                  ),
                   const SizedBox(height: 2),
                   _caption(context),
                   if (post.hasMedia) ...<Widget>[
@@ -207,10 +221,11 @@ class _PostCardState extends State<PostCard> {
 }
 
 class _Header extends StatelessWidget {
-  const _Header({required this.post, this.onAuthorTap});
+  const _Header({required this.post, this.onAuthorTap, required this.overflow});
 
   final Post post;
   final VoidCallback? onAuthorTap;
+  final Widget overflow;
 
   @override
   Widget build(BuildContext context) {
@@ -251,20 +266,86 @@ class _Header extends StatelessWidget {
         Text('  ·  ', style: AppTextStyles.handle),
         Text(timeAgo(post.createdAt), style: AppTextStyles.handle),
         const Spacer(),
-        InkWell(
-          onTap: () {},
-          borderRadius: BorderRadius.circular(999),
-          child: const Padding(
-            padding: EdgeInsets.all(2),
-            child: Icon(
-              Icons.more_horiz,
-              size: 18,
-              color: AppColors.secondaryText,
-            ),
-          ),
+        overflow,
+      ],
+    );
+  }
+}
+
+/// The three-dot overflow menu on a [PostCard]: mute author, block author, and
+/// report post. Wired to [SafetyRepository]; mute/block show an Undo snackbar,
+/// report opens a reason sheet and confirms optimistically.
+class _PostOverflowMenu extends StatelessWidget {
+  const _PostOverflowMenu({required this.post});
+
+  final Post post;
+
+  @override
+  Widget build(BuildContext context) {
+    final author = post.author;
+    return PopupMenuButton<String>(
+      tooltip: 'More',
+      icon: const Icon(
+        Icons.more_horiz,
+        size: 18,
+        color: AppColors.secondaryText,
+      ),
+      color: AppColors.surface,
+      onSelected: (value) => _onSelected(context, value),
+      itemBuilder: (context) => <PopupMenuEntry<String>>[
+        PopupMenuItem<String>(
+          value: 'mute',
+          child: Text('Mute @${author.username}'),
+        ),
+        PopupMenuItem<String>(
+          value: 'block',
+          child: Text('Block @${author.username}'),
+        ),
+        const PopupMenuItem<String>(
+          value: 'report',
+          child: Text('Report post'),
         ),
       ],
     );
+  }
+
+  Future<void> _onSelected(BuildContext context, String value) async {
+    final safety = SafetyRepository.instance;
+    final author = post.author;
+    switch (value) {
+      case 'mute':
+        safety.mute(author.id);
+        _showUndo(context, 'Muted @${author.username}',
+            () => safety.unmute(author.id));
+      case 'block':
+        safety.block(author.id);
+        _showUndo(context, 'Blocked @${author.username}',
+            () => safety.unblock(author.id));
+      case 'report':
+        await showReportSheet(
+          context,
+          targetType: 'post',
+          targetId: post.id,
+          targetLabel: 'this post',
+        );
+    }
+  }
+
+  void _showUndo(BuildContext context, String message, VoidCallback undo) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          backgroundColor: AppColors.surface,
+          behavior: SnackBarBehavior.floating,
+          action: SnackBarAction(
+            label: 'Undo',
+            textColor: AppColors.accent,
+            onPressed: undo,
+          ),
+        ),
+      );
   }
 }
 

@@ -11,6 +11,7 @@ class UserProfile {
     this.verificationKind = 'verified',
     this.followers = 0,
     this.following = 0,
+    this.isPrivate = false,
   });
 
   /// Stable unique id.
@@ -43,6 +44,11 @@ class UserProfile {
   /// Following count.
   final int following;
 
+  /// Whether the account is private (maps to `profiles.is_private`, added in
+  /// migration 0002). A private account gates follow requests and content
+  /// visibility server-side; the client mirrors the flag for the settings UI.
+  final bool isPrivate;
+
   /// Convenience: '@username'.
   String get handle => '@$username';
 
@@ -57,6 +63,7 @@ class UserProfile {
     String? verificationKind,
     int? followers,
     int? following,
+    bool? isPrivate,
   }) {
     return UserProfile(
       id: id ?? this.id,
@@ -69,6 +76,7 @@ class UserProfile {
       verificationKind: verificationKind ?? this.verificationKind,
       followers: followers ?? this.followers,
       following: following ?? this.following,
+      isPrivate: isPrivate ?? this.isPrivate,
     );
   }
 

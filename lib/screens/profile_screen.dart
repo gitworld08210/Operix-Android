@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import '../data/auth_repository.dart';
 import '../data/post_repository.dart';
 import '../data/profile_repository.dart';
+import '../data/relationship_repository.dart';
+import '../data/safety_repository.dart';
 import '../models/post.dart';
 import '../models/user_profile.dart';
 import '../theme/app_colors.dart';
@@ -11,7 +13,10 @@ import '../theme/app_theme.dart';
 import '../utils/format.dart';
 import '../widgets/avatar.dart';
 import '../widgets/post_card.dart';
+import '../widgets/report_sheet.dart';
 import '../widgets/verified_badge.dart';
+import 'edit_profile_screen.dart';
+import 'settings_screen.dart';
 
 /// Profile screen with a banner, overlapping avatar, bio + counts, and
 /// Posts / Media tabs.
@@ -48,6 +53,18 @@ class _ProfileScreenState extends State<ProfileScreen>
       .where((p) => p.author.id == widget.profile.id)
       .toList();
 
+  void _openSettings() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => const SettingsScreen()),
+    );
+  }
+
+  void _openEditProfile() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => const EditProfileScreen()),
+    );
+  }
+
   Future<void> _signOut() async {
     try {
       await AuthRepository.instance.signOut();
@@ -67,26 +84,134 @@ class _ProfileScreenState extends State<ProfileScreen>
     }
   }
 
+  void _snack(String message, {VoidCallback? undo}) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          backgroundColor: AppColors.surface,
+          behavior: SnackBarBehavior.floating,
+          action: undo == null
+              ? null
+              : SnackBarAction(
+                  label: 'Undo',
+                  textColor: AppColors.accent,
+                  onPressed: undo,
+                ),
+        ),
+      );
+  }
+
+  Future<void> _onSafetyAction(String value) async {
+    final safety = SafetyRepository.instance;
+    final profile = widget.profile;
+    switch (value) {
+      case 'mute':
+        safety.mute(profile.id);
+        _snack('Muted @${profile.username}', undo: () => safety.unmute(profile.id));
+      case 'unmute':
+        safety.unmute(profile.id);
+        _snack('Unmuted @${profile.username}');
+      case 'block':
+        safety.block(profile.id);
+        _snack('Blocked @${profile.username}', undo: () => safety.unblock(profile.id));
+      case 'unblock':
+        safety.unblock(profile.id);
+        _snack('Unblocked @${profile.username}');
+      case 'report':
+        await showReportSheet(
+          context,
+          targetType: 'profile',
+          targetId: profile.id,
+          targetLabel: '@${profile.username}',
+        );
+    }
+  }
+
+  void _onFollowTap() {
+    final rel = RelationshipRepository.instance;
+    final profile = widget.profile;
+    final state = rel.followStateFor(profile.id);
+    if (state == FollowState.none) {
+      rel.follow(profile);
+      _snack(
+        profile.isPrivate
+            ? 'Requested to follow @${profile.username}'
+            : 'Following @${profile.username}',
+        undo: () => rel.unfollow(profile.id),
+      );
+    } else {
+      // Following or Requested -> unfollow / cancel the request.
+      rel.unfollow(profile.id);
+      _snack(
+        state == FollowState.requested
+            ? 'Request cancelled'
+            : 'Unfollowed @${profile.username}',
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final profile = widget.profile;
     return Scaffold(
       body: AnimatedBuilder(
-        animation: PostRepository.instance,
+        animation: Listenable.merge(<Listenable>[
+          PostRepository.instance,
+          SafetyRepository.instance,
+          RelationshipRepository.instance,
+        ]),
         builder: (context, _) {
           final posts = _userPosts;
           final media = posts.where((p) => p.hasMedia).toList();
+          final isBlocked = SafetyRepository.instance.isBlocked(profile.id);
+          final isMuted = SafetyRepository.instance.isMuted(profile.id);
+          final followState =
+              RelationshipRepository.instance.followStateFor(profile.id);
+          // A private account's content is gated until the viewer's follow is
+          // accepted. This is a UX mirror of the server's can_view_profile
+          // gate (migration 0002), which is the TRUE enforcement.
+          final isPrivateGated = !_isCurrentUser &&
+              profile.isPrivate &&
+              followState != FollowState.following;
           return NestedScrollView(
             headerSliverBuilder: (context, _) => <Widget>[
               SliverAppBar(
                 pinned: true,
                 title: Text(profile.displayName),
                 actions: <Widget>[
-                  if (_isCurrentUser)
+                  if (_isCurrentUser) ...<Widget>[
+                    IconButton(
+                      tooltip: 'Settings',
+                      icon: const Icon(Icons.settings_outlined),
+                      onPressed: _openSettings,
+                    ),
                     IconButton(
                       tooltip: 'Sign out',
                       icon: const Icon(Icons.logout),
                       onPressed: _signOut,
+                    ),
+                  ] else
+                    PopupMenuButton<String>(
+                      tooltip: 'More',
+                      icon: const Icon(Icons.more_horiz),
+                      color: AppColors.surface,
+                      onSelected: _onSafetyAction,
+                      itemBuilder: (context) => <PopupMenuEntry<String>>[
+                        PopupMenuItem<String>(
+                          value: isMuted ? 'unmute' : 'mute',
+                          child: Text(isMuted ? 'Unmute' : 'Mute'),
+                        ),
+                        PopupMenuItem<String>(
+                          value: isBlocked ? 'unblock' : 'block',
+                          child: Text(isBlocked ? 'Unblock' : 'Block'),
+                        ),
+                        const PopupMenuItem<String>(
+                          value: 'report',
+                          child: Text('Report'),
+                        ),
+                      ],
                     ),
                 ],
                 expandedHeight: 140,
@@ -98,6 +223,10 @@ class _ProfileScreenState extends State<ProfileScreen>
                 child: _ProfileHeader(
                   profile: profile,
                   isCurrentUser: _isCurrentUser,
+                  isBlocked: isBlocked,
+                  followState: followState,
+                  onEditProfile: _openEditProfile,
+                  onFollowTap: _onFollowTap,
                 ),
               ),
               SliverPersistentHeader(
@@ -118,13 +247,15 @@ class _ProfileScreenState extends State<ProfileScreen>
                 ),
               ),
             ],
-            body: TabBarView(
-              controller: _tabController,
-              children: <Widget>[
-                _PostsTab(posts: posts),
-                _MediaGrid(posts: media),
-              ],
-            ),
+            body: isPrivateGated
+                ? const _PrivateAccountGate()
+                : TabBarView(
+                    controller: _tabController,
+                    children: <Widget>[
+                      _PostsTab(posts: posts),
+                      _MediaGrid(posts: media),
+                    ],
+                  ),
           );
         },
       ),
@@ -157,10 +288,32 @@ class _Banner extends StatelessWidget {
 }
 
 class _ProfileHeader extends StatelessWidget {
-  const _ProfileHeader({required this.profile, required this.isCurrentUser});
+  const _ProfileHeader({
+    required this.profile,
+    required this.isCurrentUser,
+    required this.isBlocked,
+    required this.followState,
+    required this.onEditProfile,
+    required this.onFollowTap,
+  });
 
   final UserProfile profile;
   final bool isCurrentUser;
+  final bool isBlocked;
+  final FollowState followState;
+  final VoidCallback onEditProfile;
+  final VoidCallback onFollowTap;
+
+  String get _followLabel {
+    switch (followState) {
+      case FollowState.none:
+        return 'Follow';
+      case FollowState.requested:
+        return 'Requested';
+      case FollowState.following:
+        return 'Following';
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -188,30 +341,40 @@ class _ProfileHeader extends StatelessWidget {
                 ),
                 Padding(
                   padding: const EdgeInsets.only(bottom: 4),
-                  // TODO(avatar-upload): when this is the current user, an
-                  // "Edit profile" flow can update the avatar via
-                  // StorageService.uploadAvatar. No image_picker dependency is
-                  // bundled (deps kept minimal), so wiring a byte source is the
-                  // remaining step. Once bytes are available:
-                  //
-                  //   final userId = AuthRepository.instance.currentUser?.id;
-                  //   if (userId == null) return; // must be signed in
-                  //   final url = await StorageService.uploadAvatar(
-                  //     userId: userId,
-                  //     bytes: pickedBytes,
-                  //   );
-                  //   // then persist url onto profiles.avatar_url and refresh.
-                  //
-                  // Editable text fields (name/bio) already persist through
+                  // For the current user this opens the Edit profile flow
+                  // (display name + bio), which persists through
                   // ProfileRepository.instance.updateProfile.
+                  //
+                  // TODO(avatar-upload): the edit flow can later update the
+                  // avatar via StorageService.uploadAvatar once an image byte
+                  // source is wired (no image_picker dependency is bundled, to
+                  // keep deps minimal).
                   child: OutlinedButton(
-                    onPressed: () {},
+                    onPressed: isCurrentUser
+                        ? onEditProfile
+                        : (isBlocked ? null : onFollowTap),
                     style: OutlinedButton.styleFrom(
                       foregroundColor: AppColors.primaryText,
                       side: const BorderSide(color: AppColors.border),
                       shape: const StadiumBorder(),
                     ),
-                    child: Text(isCurrentUser ? 'Edit profile' : 'Follow'),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        if (!isCurrentUser &&
+                            !isBlocked &&
+                            profile.isPrivate &&
+                            followState != FollowState.following) ...<Widget>[
+                          const Icon(Icons.lock_outline, size: 15),
+                          const SizedBox(width: 4),
+                        ],
+                        Text(
+                          isCurrentUser
+                              ? 'Edit profile'
+                              : (isBlocked ? 'Blocked' : _followLabel),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ],
@@ -251,6 +414,22 @@ class _ProfileHeader extends StatelessWidget {
                     _Count(value: profile.followers, label: 'Followers'),
                   ],
                 ),
+                if (isBlocked) ...<Widget>[
+                  const SizedBox(height: AppSpacing.md),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(AppSpacing.md),
+                    decoration: BoxDecoration(
+                      color: AppColors.surface,
+                      borderRadius: BorderRadius.circular(AppRadii.md),
+                    ),
+                    child: Text(
+                      'You have blocked this account. Their posts are hidden '
+                      'from your feed.',
+                      style: AppTextStyles.caption,
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -346,6 +525,40 @@ class _MediaGrid extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// Shown in place of the tab content when a private account has not accepted
+/// the viewer's follow. This is a UX mirror of the server-side
+/// `can_view_profile` gate (migration 0002), which is the true enforcement.
+class _PrivateAccountGate extends StatelessWidget {
+  const _PrivateAccountGate();
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(AppSpacing.xxl),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            const Icon(
+              Icons.lock_outline,
+              size: 44,
+              color: AppColors.secondaryText,
+            ),
+            const SizedBox(height: AppSpacing.md),
+            Text('This account is private', style: AppTextStyles.title),
+            const SizedBox(height: AppSpacing.xs),
+            Text(
+              'Follow this account to see their posts and media.',
+              textAlign: TextAlign.center,
+              style: AppTextStyles.handle,
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
