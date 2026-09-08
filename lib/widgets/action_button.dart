@@ -62,8 +62,8 @@ class ActionButton extends StatelessWidget {
     final button = InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(999),
-      splashColor: activeColor.withOpacity(0.12),
-      highlightColor: activeColor.withOpacity(0.08),
+      splashColor: activeColor.withValues(alpha: 0.12),
+      highlightColor: activeColor.withValues(alpha: 0.08),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
         child: row,

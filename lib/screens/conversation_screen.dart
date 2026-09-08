@@ -179,10 +179,10 @@ class _Composer extends StatelessWidget {
                 textInputAction: TextInputAction.send,
                 onSubmitted: (_) => onSend(),
                 style: AppTextStyles.body,
-                decoration: InputDecoration(
+                decoration: const InputDecoration(
                   hintText: 'Start a message',
                   isDense: true,
-                  contentPadding: const EdgeInsets.symmetric(
+                  contentPadding: EdgeInsets.symmetric(
                     horizontal: AppSpacing.lg,
                     vertical: AppSpacing.md,
                   ),
