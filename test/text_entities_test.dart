@@ -93,4 +93,42 @@ void main() {
       expect(extractMentions(caption), <String>{'nova'});
     });
   });
+
+  group('shared linkify/extract grammar (FEAT-012)', () {
+    // The PostCard linkifier and the extractors reference the SAME exported
+    // patterns, so a highlighted span and its extracted/linked entity are
+    // byte-identical. This proves they never disagree on the tricky
+    // '#design.system @first.last' case: the hashtag body excludes dots (the
+    // trailing '.' ends the tag => 'design'), while the mention body allows
+    // dots (=> 'first.last').
+    const caption = '#design.system @first.last';
+
+    test('hashtagPattern highlights and extracts the same body', () {
+      final match = hashtagPattern.firstMatch(caption)!;
+      // The highlighted span is the full match; the extracted entity is the
+      // captured body. Dot ends the hashtag.
+      expect(match.group(0), '#design');
+      expect(match.group(1), 'design');
+      expect(extractHashtags(caption), <String>{'design'});
+    });
+
+    test('mentionPattern highlights and extracts the same body', () {
+      final match = mentionPattern.firstMatch(caption)!;
+      // Dot is allowed in a mention body.
+      expect(match.group(0), '@first.last');
+      expect(match.group(1), 'first.last');
+      expect(extractMentions(caption), <String>{'first.last'});
+    });
+
+    test('combined linkify alternation colors both kinds byte-identically', () {
+      // Mirrors post_card.dart _linkify: hashtag OR mention alternation over
+      // the shared pattern sources.
+      final combined = RegExp(
+        '(?:${hashtagPattern.pattern})|(?:${mentionPattern.pattern})',
+      );
+      final highlighted =
+          combined.allMatches(caption).map((m) => m.group(0)).toList();
+      expect(highlighted, <String>['#design', '@first.last']);
+    });
+  });
 }

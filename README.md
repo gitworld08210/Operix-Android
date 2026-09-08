@@ -69,6 +69,33 @@ rewriting every consumer:
   `post_attachments` array (ordered by position) and **falls back** to the
   legacy `media_url` / `media_type` columns for pre-`0005` rows.
 
+### First-class text posts (the X core)
+
+A **text-only tweet** is simply a `Post` with zero attachments
+(`PostKind.text`), and it is a first-class citizen of the feed:
+
+- **280-character limit (X standard).** `lib/utils/text_post.dart` exposes the
+  single canonical constant `kMaxTextPostChars = 280` and a **pure, Supabase-free
+  validator** `validateTextPost(content)` returning
+  `length` / `remaining` / `isEmpty` / `isOverLimit` / `isValid`. Length is
+  counted in **Unicode grapheme clusters** (`content.characters.length`) so
+  emoji and combining marks count exactly as the composer shows them. A post is
+  postable when the **trimmed** content is non-empty **and** within the limit.
+  The composer reads this one source of truth for `_maxChars`, `_canPost`, and
+  the live character counter (which turns to the over-limit color and disables
+  **Post** past 280). Attachment posts remain postable as before.
+- **Unified `#`/`@` linkify + extract grammar.** The PostCard linkifier and the
+  `extractHashtags` / `extractMentions` extractors both reference the **same
+  exported patterns** (`hashtagPattern` / `mentionPattern` in
+  `lib/utils/text_entities.dart`), so a highlighted span and its
+  extracted/linked entity are **byte-identical**. A hashtag body excludes dots
+  (a trailing `.` ends the tag, so `#design.system` ⇒ `design`) while a mention
+  body allows dots (`@first.last` is one mention). Entities render in the
+  X-blue accent (`#1D9BF0`).
+- **No empty media frame.** PostCard gates its media block on `post.hasMedia`,
+  so a text post renders **header + linkified caption + action row only** — no
+  empty `AspectRatio` / `ClipRRect` frame.
+
 > **Phase 4 seam — no real capture/upload yet.** Attachments are carried **by
 > URL/reference** only. There is no device gallery/camera capture of bytes: the
 > mock seed and the compose **Photos** button use hosted picsum placeholder

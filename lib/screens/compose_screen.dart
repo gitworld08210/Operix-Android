@@ -12,6 +12,7 @@ import '../theme/app_text_styles.dart';
 import '../theme/app_theme.dart';
 import '../utils/ids.dart';
 import '../utils/text_entities.dart';
+import '../utils/text_post.dart';
 import '../widgets/avatar.dart';
 
 /// Full-screen compose route. Building a [Post] from the current profile and
@@ -28,7 +29,9 @@ class _ComposeScreenState extends State<ComposeScreen> {
   // PHASE 4/5 SEAM: a free-text location this phase. A real place-picker /
   // geocoder (resolving to a place name + lat/lng) replaces this input later.
   final TextEditingController _locationController = TextEditingController();
-  static const int _maxChars = 280;
+  // The canonical text-post limit lives in utils/text_post.dart so the
+  // composer, the char counter, and the validator read ONE source of truth.
+  static const int _maxChars = kMaxTextPostChars;
   int _length = 0;
 
   /// Ordered image attachments assembled for this compose (carried BY URL).
@@ -60,11 +63,19 @@ class _ComposeScreenState extends State<ComposeScreen> {
     super.dispose();
   }
 
-  // A post is postable when it has text OR at least one attachment, and the
-  // text is within the character limit. Attachments alone (e.g. an image-only
-  // carousel) are enough to post.
-  bool get _canPost =>
-      (_length > 0 || _attachments.isNotEmpty) && _length <= _maxChars;
+  // A post is postable when it is a valid text-only tweet OR it carries at
+  // least one attachment while staying within the character limit. The
+  // text-only path is driven by the shared validateTextPost helper so the
+  // composer, counter, and unit tests agree; attachment-post behavior is
+  // unchanged (attachments alone remain postable as long as text isn't over
+  // the limit).
+  bool get _canPost {
+    final validation = validateTextPost(_controller.text);
+    if (_attachments.isNotEmpty) {
+      return !validation.isOverLimit;
+    }
+    return validation.isValid;
+  }
 
   void _post() {
     if (!_canPost) return;

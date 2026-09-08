@@ -9,6 +9,7 @@ import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
 import '../theme/app_theme.dart';
 import '../utils/format.dart';
+import '../utils/text_entities.dart';
 import 'action_button.dart';
 import 'avatar.dart';
 import 'report_sheet.dart';
@@ -173,9 +174,18 @@ class _PostCardState extends State<PostCard> {
   }
 
   /// Splits the text into runs, coloring #hashtags and @mentions in X-blue.
+  ///
+  /// Highlighting uses the SAME grammar the extractors use (see
+  /// `utils/text_entities.dart` [hashtagPattern] / [mentionPattern]) so the
+  /// highlighted span and the extracted/linked entity are byte-identical: a
+  /// hashtag body excludes dots (a trailing `.` ends the tag), while a mention
+  /// body allows dots. The two source patterns are combined into one alternation
+  /// so a single left-to-right scan colors both kinds.
   TextSpan _linkify(String text) {
     final spans = <TextSpan>[];
-    final pattern = RegExp(r'([#@][A-Za-z0-9_\.]+)');
+    final pattern = RegExp(
+      '(?:${hashtagPattern.pattern})|(?:${mentionPattern.pattern})',
+    );
     var lastEnd = 0;
     for (final match in pattern.allMatches(text)) {
       if (match.start > lastEnd) {

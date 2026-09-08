@@ -325,6 +325,27 @@ abstract final class MockData {
         likeCount: 430,
         viewCount: 15600,
       ),
+      // p12: a FIRST-CLASS TEXT-ONLY tweet (zero attachments => kind text). It
+      // deliberately carries a #hashtag followed by a dot AND an @mention with
+      // a dot to exercise the UNIFIED linkify/extract grammar (hashtag body
+      // excludes dots, so '#design.system' highlights/extracts 'design'; a
+      // mention body allows dots, so '@first.last' is one entity). Placed LAST
+      // with the OLDEST createdAt so the newest-first feed ordering and the
+      // existing p1..p11 order/relative-count assertions in
+      // post_repository_test.dart are unaffected. `citydesk` (not aria/jules)
+      // keeps the Following tab subset unchanged.
+      Post(
+        id: 'p12',
+        author: citydesk,
+        content:
+            'Style guide is live. Everything ships through our #design.system '
+            'now — questions to @first.last on the platform team.',
+        createdAt: now.subtract(const Duration(days: 1, hours: 9)),
+        replyCount: 4,
+        repostCount: 7,
+        likeCount: 96,
+        viewCount: 4100,
+      ),
     ];
   }
 
