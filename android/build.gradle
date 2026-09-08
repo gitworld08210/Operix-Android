@@ -15,6 +15,28 @@ subprojects {
     project.evaluationDependsOn(":app")
 }
 
+// Some Flutter plugins (e.g. app_links, pulled in transitively by
+// image_picker) ship Android modules that expect the host to inject
+// `compileSdkVersion` / `namespace`. On certain AGP + Flutter combinations
+// this injection does not happen and the plugin's own build.gradle fails with
+// "compileSdkVersion is not specified" / "Cannot invoke method substring() on
+// null object". Force sane values onto any library subproject that is missing
+// them so those plugins configure correctly. This is the standard workaround.
+subprojects {
+    afterEvaluate { project ->
+        if (project.hasProperty("android")) {
+            project.android {
+                if (namespace == null) {
+                    namespace = project.group
+                }
+                if (compileSdk == null) {
+                    compileSdk = 35
+                }
+            }
+        }
+    }
+}
+
 tasks.register("clean", Delete) {
     delete rootProject.buildDir
 }
