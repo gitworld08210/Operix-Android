@@ -64,19 +64,19 @@ class AuthRepository extends ChangeNotifier {
   /// Throws an [OtpException] with a human-readable message when the function
   /// reports a failure (rate limiting, invalid email, send failure).
   Future<void> sendOtp(String email) async {
-    late final FunctionResponse res;
     try {
-      res = await supabase.functions.invoke(
+      // In supabase_flutter v2 `invoke` throws a [FunctionException] on any
+      // non-2xx response, so the error body is read from the exception below.
+      await supabase.functions.invoke(
         'send-otp',
         body: <String, dynamic>{'email': email},
       );
     } on FunctionException catch (e) {
-      throw OtpException(_sendErrorMessage(_errorCode(e.details), null));
-    }
-    if (res.status < 200 || res.status >= 300) {
-      final data = res.data;
+      // `details` holds the parsed JSON body, e.g.
+      // {'error': 'rate_limited', 'message': 'try again in a few minutes'}.
+      // Surface the server's specific `message` (notably for rate limiting).
       throw OtpException(
-        _sendErrorMessage(_dataString(data, 'error'), _dataString(data, 'message')),
+        _sendErrorMessage(_errorCode(e.details), _detailsString(e.details, 'message')),
       );
     }
   }
@@ -91,17 +91,17 @@ class AuthRepository extends ChangeNotifier {
     required String email,
     required String token,
   }) async {
-    late final FunctionResponse res;
+    final FunctionResponse res;
     try {
+      // A non-2xx response throws a [FunctionException] (supabase_flutter v2);
+      // the error code is read from its `details` in the catch below. The
+      // success path (200) returns normally with the `token_hash` body.
       res = await supabase.functions.invoke(
         'verify-otp',
         body: <String, dynamic>{'email': email, 'code': token},
       );
     } on FunctionException catch (e) {
       throw OtpException(_verifyErrorMessage(_errorCode(e.details)));
-    }
-    if (res.status < 200 || res.status >= 300) {
-      throw OtpException(_verifyErrorMessage(_dataString(res.data, 'error')));
     }
 
     final tokenHash = _dataString(res.data, 'token_hash');
@@ -168,6 +168,17 @@ class AuthRepository extends ChangeNotifier {
       if (value is String) return value;
     }
     if (details is String && details.isNotEmpty) return details;
+    return null;
+  }
+
+  /// Reads a string [key] from a [FunctionException]'s `details` when it is a
+  /// parsed JSON body (`Map`), e.g. the server's `message`. Returns null when
+  /// absent or not a string. Mirrors [_errorCode]'s Map handling.
+  String? _detailsString(Object? details, String key) {
+    if (details is Map) {
+      final value = details[key];
+      if (value is String) return value;
+    }
     return null;
   }
 
