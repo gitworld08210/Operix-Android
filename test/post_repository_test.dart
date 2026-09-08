@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:oneleven/data/feed_page.dart';
 import 'package:oneleven/data/mock_data.dart';
 import 'package:oneleven/data/post_repository.dart';
 import 'package:oneleven/data/save_repository.dart';
@@ -331,6 +332,127 @@ void main() {
     });
   });
 
+  group('mapPostRow quote-posts', () {
+    Map<String, dynamic> quotedInner(String id) => <String, dynamic>{
+          'id': id,
+          'content': 'the quoted post',
+          'media_url': null,
+          'media_type': 'none',
+          'created_at': '2024-01-01T00:00:00.000Z',
+          'reply_count': 1,
+          'repost_count': 1,
+          'like_count': 1,
+          'view_count': 1,
+          'profiles': <String, dynamic>{
+            'id': 'quoted-author',
+            'username': 'quoted_user',
+            'display_name': 'Quoted User',
+          },
+        };
+
+    test('maps quoted_post_id + nested quoted into a one-level embed', () {
+      final row = _row('p1')
+        ..['quoted_post_id'] = 'q1'
+        ..['quoted'] = (quotedInner('q1')
+          ..['post_attachments'] = <Map<String, dynamic>>[
+            <String, dynamic>{
+              'id': 'qa0',
+              'post_id': 'q1',
+              'position': 0,
+              'type': 'image',
+              'url': 'https://example.com/qa0.jpg',
+            },
+          ]);
+      final post = PostRepository.mapPostRow(row);
+      expect(post.quotedPostId, 'q1');
+      expect(post.quotedPost, isNotNull);
+      expect(post.quotedPost!.id, 'q1');
+      expect(post.quotedPost!.content, 'the quoted post');
+      expect(post.quotedPost!.author.id, 'quoted-author');
+      expect(post.quotedPost!.attachments.length, 1);
+      expect(post.quotedPost!.kind, PostKind.image);
+      // One-level cap: the embedded post's own quotedPost is null even if it
+      // carried a quoted join.
+      expect(post.quotedPost!.quotedPost, isNull);
+    });
+
+    test('does NOT recurse a second level (embedded quotedPost stays null)',
+        () {
+      final row = _row('p1')
+        ..['quoted_post_id'] = 'q1'
+        ..['quoted'] = (quotedInner('q1')
+          ..['quoted_post_id'] = 'q2'
+          ..['quoted'] = quotedInner('q2'));
+      final post = PostRepository.mapPostRow(row);
+      expect(post.quotedPost, isNotNull);
+      // The embed still carries its own durable FK...
+      expect(post.quotedPost!.quotedPostId, 'q2');
+      // ...but its hydrated embed is NOT resolved (one level only).
+      expect(post.quotedPost!.quotedPost, isNull);
+    });
+
+    test('quoted_post_id present but no nested quoted => embed null', () {
+      final row = _row('p1')..['quoted_post_id'] = 'q1';
+      final post = PostRepository.mapPostRow(row);
+      expect(post.quotedPostId, 'q1');
+      expect(post.quotedPost, isNull);
+    });
+
+    test('neither quoted_post_id nor quoted => both null (normal post)', () {
+      final post = PostRepository.mapPostRow(_row('p1'));
+      expect(post.quotedPostId, isNull);
+      expect(post.quotedPost, isNull);
+    });
+  });
+
+  group('Post.copyWith quote-post fields', () {
+    Post base() => Post(
+          id: 'c1',
+          author: MockData.currentUser,
+          content: 'x',
+          createdAt: DateTime(2024),
+        );
+
+    Post quotedTarget() => Post(
+          id: 'q1',
+          author: MockData.aria,
+          content: 'quoted',
+          createdAt: DateTime(2023),
+        );
+
+    test('carries quotedPostId/quotedPost forward', () {
+      final quoted = quotedTarget();
+      final withQuote =
+          base().copyWith(quotedPostId: 'q1', quotedPost: quoted);
+      expect(withQuote.quotedPostId, 'q1');
+      expect(withQuote.quotedPost, quoted);
+      // A bare copyWith carries them unchanged.
+      final unchanged = withQuote.copyWith(content: 'y');
+      expect(unchanged.quotedPostId, 'q1');
+      expect(unchanged.quotedPost, quoted);
+    });
+
+    test('clearQuotedPost / clearQuotedPostId null the fields', () {
+      final withQuote =
+          base().copyWith(quotedPostId: 'q1', quotedPost: quotedTarget());
+      final clearedEmbed = withQuote.copyWith(clearQuotedPost: true);
+      expect(clearedEmbed.quotedPost, isNull);
+      // The durable FK is untouched by clearing only the embed.
+      expect(clearedEmbed.quotedPostId, 'q1');
+
+      final clearedId = withQuote.copyWith(clearQuotedPostId: true);
+      expect(clearedId.quotedPostId, isNull);
+    });
+
+    test('== / hashCode stay id-based and ignore the quoted fields', () {
+      final a = base();
+      final b = base().copyWith(quotedPostId: 'q1', quotedPost: quotedTarget());
+      // Same id => equal despite differing quoted fields.
+      expect(a == b, isTrue);
+      expect(a.hashCode, b.hashCode);
+    });
+  });
+
   group('react / clearReaction', () {
     test('sets myReaction and increments the right bucket with one notify', () {
       final post = firstPost();
@@ -603,4 +725,80 @@ void main() {
       expect(repo.toggleBookmark('nope'), isNull);
     });
   });
+
+  group('loadMore / loadMoreFollowing (offline mock path)', () {
+    // Under `flutter test` Supabase is not initialized, so both pagers must be
+    // guarded no-ops returning FeedPage.empty (never throwing, never an error
+    // signal), preserving the mock-fallback contract.
+    final cursor = repoCursorFromFirst;
+
+    test('loadMore returns FeedPage.empty when Supabase is unavailable',
+        () async {
+      final page = await repo.loadMore(cursor(repo));
+      expect(page.posts, isEmpty);
+      expect(page.hasMore, isFalse);
+      expect(page.error, isFalse);
+    });
+
+    test(
+        'loadMoreFollowing returns FeedPage.empty (not failure) when Supabase '
+        'is unavailable', () async {
+      // The Following pager scopes to followed authors via a guarded `follows`
+      // lookup. Under an UNINITIALIZED client that lookup is a no-op returning
+      // an empty follow set, so the pager must return FeedPage.empty — NOT
+      // FeedPage.failure. This is the load-bearing distinction behind the
+      // review follow-up: only an initialized-but-throwing follows fetch should
+      // surface as a failure (the retry path); an empty/offline follow set is a
+      // legitimate end-of-feed. Proving `error` is false here guards against a
+      // regression that would fail the offline pager open to a retry footer (or
+      // vice versa, fail a real failure closed to "all caught up").
+      final page = await repo.loadMoreFollowing(cursor(repo));
+      expect(page.posts, isEmpty);
+      expect(page.hasMore, isFalse);
+      expect(page.error, isFalse, reason: 'offline follow set is empty, not a '
+          'failure — must not surface the retry footer');
+    });
+
+    test('loadMore does not throw and leaves the cache unchanged', () async {
+      final before = repo.forYou().length;
+      await repo.loadMore(cursor(repo));
+      expect(repo.forYou().length, before);
+    });
+
+    test('loadMoreFollowing does not throw and leaves the cache unchanged',
+        () async {
+      // Companion to the loadMore no-throw guard: the Following pager (whose
+      // follows lookup now RETHROWS a real query failure so the caller can
+      // route it to FeedPage.failure) must STILL be a silent no-op offline —
+      // the follows lookup returns empty before any throw can escape.
+      final before = repo.forYou().length;
+      await repo.loadMoreFollowing(cursor(repo));
+      expect(repo.forYou().length, before);
+    });
+  });
+
+  group('FeedPage failure-vs-empty distinction (Following pager)', () {
+    // The Following pager must map a genuinely-empty follow set to
+    // FeedPage.empty (end-of-feed) and a real follows-fetch failure to
+    // FeedPage.failure (retry). We can't drive a live throwing `follows` query
+    // without a backend, but we can pin the two target FeedPage shapes the
+    // pager selects between so the semantics stay explicit and any future
+    // refactor that conflates them fails here.
+    test('FeedPage.empty is end-of-feed with no error/retry', () {
+      expect(FeedPage.empty.error, isFalse);
+      expect(FeedPage.empty.hasMore, isFalse);
+      expect(FeedPage.empty.posts, isEmpty);
+    });
+
+    test('FeedPage.failure signals a retriable error, not end-of-feed', () {
+      expect(FeedPage.failure.error, isTrue);
+      expect(FeedPage.failure.hasMore, isTrue);
+      expect(FeedPage.failure.posts, isEmpty);
+    });
+  });
 }
+
+/// Helper: a keyset cursor derived from the repository's current first post,
+/// used to drive the offline pagination no-op tests.
+FeedCursor Function(PostRepository) get repoCursorFromFirst =>
+    (repo) => FeedCursor.fromPost(repo.forYou().first);

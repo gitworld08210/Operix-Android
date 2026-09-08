@@ -17,10 +17,19 @@
 library;
 
 /// Matches a `#hashtag` and captures its body (`[A-Za-z0-9_]+`, no dot).
-final RegExp _hashtagPattern = RegExp(r'#([A-Za-z0-9_]+)');
+///
+/// Exported as the SINGLE source of the hashtag grammar so the PostCard
+/// linkifier (`lib/widgets/post_card.dart` `_linkify`) highlights exactly what
+/// [extractHashtags] extracts — a trailing `.` ends the tag (`#design.system`
+/// highlights and extracts `design`).
+final RegExp hashtagPattern = RegExp(r'#([A-Za-z0-9_]+)');
 
 /// Matches an `@mention` and captures its body (`[A-Za-z0-9_\.]+`, dots ok).
-final RegExp _mentionPattern = RegExp(r'@([A-Za-z0-9_\.]+)');
+///
+/// Exported as the SINGLE source of the mention grammar so the PostCard
+/// linkifier highlights exactly what [extractMentions] extracts (a username may
+/// contain dots, so `@first.last` is one mention).
+final RegExp mentionPattern = RegExp(r'@([A-Za-z0-9_\.]+)');
 
 /// Extracts the set of NORMALIZED hashtags from [content].
 ///
@@ -29,7 +38,7 @@ final RegExp _mentionPattern = RegExp(r'@([A-Za-z0-9_\.]+)');
 /// there are no hashtags. Feeds the `post_hashtags` relation.
 Set<String> extractHashtags(String content) {
   final result = <String>{};
-  for (final match in _hashtagPattern.allMatches(content)) {
+  for (final match in hashtagPattern.allMatches(content)) {
     final body = match.group(1);
     if (body != null && body.isNotEmpty) {
       result.add(body.toLowerCase());
@@ -45,7 +54,7 @@ Set<String> extractHashtags(String content) {
 /// relation (resolved from username to user id server-side / on persist).
 Set<String> extractMentions(String content) {
   final result = <String>{};
-  for (final match in _mentionPattern.allMatches(content)) {
+  for (final match in mentionPattern.allMatches(content)) {
     final body = match.group(1);
     if (body != null && body.isNotEmpty) {
       result.add(body.toLowerCase());

@@ -69,6 +69,33 @@ rewriting every consumer:
   `post_attachments` array (ordered by position) and **falls back** to the
   legacy `media_url` / `media_type` columns for pre-`0005` rows.
 
+### First-class text posts (the X core)
+
+A **text-only tweet** is simply a `Post` with zero attachments
+(`PostKind.text`), and it is a first-class citizen of the feed:
+
+- **280-character limit (X standard).** `lib/utils/text_post.dart` exposes the
+  single canonical constant `kMaxTextPostChars = 280` and a **pure, Supabase-free
+  validator** `validateTextPost(content)` returning
+  `length` / `remaining` / `isEmpty` / `isOverLimit` / `isValid`. Length is
+  counted in **Unicode grapheme clusters** (`content.characters.length`) so
+  emoji and combining marks count exactly as the composer shows them. A post is
+  postable when the **trimmed** content is non-empty **and** within the limit.
+  The composer reads this one source of truth for `_maxChars`, `_canPost`, and
+  the live character counter (which turns to the over-limit color and disables
+  **Post** past 280). Attachment posts remain postable as before.
+- **Unified `#`/`@` linkify + extract grammar.** The PostCard linkifier and the
+  `extractHashtags` / `extractMentions` extractors both reference the **same
+  exported patterns** (`hashtagPattern` / `mentionPattern` in
+  `lib/utils/text_entities.dart`), so a highlighted span and its
+  extracted/linked entity are **byte-identical**. A hashtag body excludes dots
+  (a trailing `.` ends the tag, so `#design.system` ⇒ `design`) while a mention
+  body allows dots (`@first.last` is one mention). Entities render in the
+  X-blue accent (`#1D9BF0`).
+- **No empty media frame.** PostCard gates its media block on `post.hasMedia`,
+  so a text post renders **header + linkified caption + action row only** — no
+  empty `AspectRatio` / `ClipRRect` frame.
+
 > **Phase 4 seam — no real capture/upload yet.** Attachments are carried **by
 > URL/reference** only. There is no device gallery/camera capture of bytes: the
 > mock seed and the compose **Photos** button use hosted picsum placeholder
@@ -76,6 +103,109 @@ rewriting every consumer:
 > loading/error placeholder pattern. Real capture + upload to the storage
 > bucket (populating the attachment URLs from device bytes) is Phase 4; the seam
 > is marked in code with `// PHASE 4 SEAM: ...`.
+
+### Quote-posts
+
+A **quote-post** is a post that embeds/references another post. It is optional
+and fully backward compatible: existing posts carry a null reference and render
+exactly as before. Quoting is **orthogonal to media kind** — you can quote with
+a text body or with media.
+
+- **Model.** `Post` carries a nullable `quotedPostId` (the durable FK) and a
+  nullable `quotedPost` (the hydrated embed used for rendering). `quotedPost`
+  may be null even when `quotedPostId` is set (the quoted post is not cached or
+  not viewable). It is **not** part of `==` / `hashCode`, which stay id-based;
+  `copyWith` exposes `clearQuotedPost` / `clearQuotedPostId` escape hatches
+  (mirroring `clearMyReaction`) since a null arg is indistinguishable from
+  "unchanged".
+- **Migration `0010_quote_posts.sql`.** Adds a nullable self-referencing FK
+  `posts.quoted_post_id uuid references public.posts(id) on delete set null`
+  (deleting a quoted post degrades the quoting post to a normal post rather than
+  cascading a delete), a guarded `posts_no_self_quote` CHECK (a post may not
+  quote itself), and an index for reverse lookups. **No new RLS is required:**
+  the existing `posts_select_viewable` policy already gates every posts row by
+  `can_view_profile(auth.uid(), owner)`, and a joined quoted post is its own
+  posts row under the same policy, so an unviewable quoted post simply yields a
+  null embed. Live application is **UNVERIFIED** in this environment (no
+  reachable Supabase) and validated by structural review only.
+- **One-level embed hydrate.** `PostRepository` fetches the quoted post one
+  level deep via the aliased self-embed `quoted:quoted_post_id(*, profiles(*),
+  post_attachments(*))`; `mapPostRow` maps the nested `quoted` object into
+  `quotedPost` but **never recurses** — the embedded post's own `quotedPost` is
+  always null. Absence of the join is tolerated gracefully (null embed).
+- **Rendering.** `PostCard` renders a compact bordered quoted-post card after
+  the caption (small avatar + name/handle + verified badge, truncated caption
+  linkified with the shared `#`/`@` grammar, and a thumbnail when the quoted
+  post has media). When `quotedPostId` is set but the embed can't be resolved it
+  shows a subtle **"This post is unavailable"** placeholder. The embedded card
+  never nests a second-level embed.
+- **Compose.** `ComposeScreen(quoted: post)` opens the composer pre-attached to
+  a quoted post (from the PostCard overflow menu's **Quote** action), shows a
+  read-only preview, and builds the post with `quotedPostId` + `quotedPost`. A
+  quote-post is postable **even with an empty body** when a quote is attached.
+
+## Infinity feed
+
+The home timeline is a genuinely endless feed mixing every content type
+(text / image / carousel / quote, and future video) on **keyset (seek)
+pagination**, not offset pagination. `lib/data/feed_page.dart` holds the
+primitives (`kFeedPageSize = 20`, `FeedCursor`, `FeedPage`) and
+`lib/data/post_repository.dart` holds the pagers.
+
+- **Keyset (seek) pagination.** Each page is fetched with a
+  `(created_at, id) < (cursor.createdAt, cursor.id)` predicate over the
+  `(created_at desc, id desc)` index — never `offset N` (which the database
+  must scan past and which degrades at scale). `id` is the stable tie-break so
+  rows sharing a `created_at` are never skipped or duplicated. The predicate
+  string is built once by the pure static `PostRepository.keysetPredicate` and
+  shared by both pagers so they cannot drift.
+- **Pagination decoupled from display ranking.** The ranking strategy
+  (`ChronologicalRanking` / `EngagementRanking` in `feed_ranking.dart`) orders
+  what is **shown**; the pagination cursor tracks the **keyset frontier**. The
+  pager pages off the TRUE keyset tail — `PostRepository.keysetMinCursor` (the
+  oldest loaded row by `created_at desc, id desc`), then each fetched
+  `FeedPage.nextCursor` — **not** the ranked display tail. This resolves a prior
+  correctness gap where paging off `posts.last` of the ranked list was correct
+  only under chronological ranking; a non-chronological strategy like
+  `EngagementRanking` can no longer corrupt pagination. Proven by a unit test
+  that `keysetMinCursor` is identical whether the list is ranked chronologically
+  or by engagement.
+- **Following-scoped query.** The For You tab uses the global `loadMore`; the
+  Following tab uses `loadMoreFollowing`, which applies the **same** keyset
+  predicate **plus** an author filter `owner in (<followed ids>)`. Without it, a
+  sparse Following feed could exhaust the global page window on non-followed
+  authors and **stall** before reaching older followed posts. The followed
+  author id set is fetched (guarded) from the `follows` table per page.
+- **No duplicates, no drops.** Fetched rows are de-duped by id against the cache
+  via the pure static `PostRepository.freshPosts` before appending, and each
+  page's `nextCursor` is the keyset tail of that page (`mapped.last`, since the
+  query orders `created_at desc, id desc`), making the cursor **strictly
+  monotonic decreasing** across pages — so no row is skipped or repeated. The
+  `forYou()` / `following()` getters still return unmodifiable, de-duped lists.
+- **Prefetch.** `_FeedList` fetches the next page when the user scrolls within
+  ~600px of the bottom, and also kicks an **initial prefetch** when the first
+  page under-fills the viewport (so a short first page still becomes endless).
+  An in-flight guard (`_loadingMore`) plus per-tab `_hasMore` prevent
+  overlapping or duplicate fetches; each tab carries its **own** cursor and
+  `_hasMore`.
+- **Footer states.** The footer decision is a pure function
+  `footerStateFor({loadingMore, hasMore, hasError, isEmpty})` returning a
+  `FeedFooterState` the widget renders off (so it is unit-testable without a
+  device or golden): a **loading-next** spinner as the last row while a fetch is
+  in flight, a subtle **"You're all caught up"** at the end of the feed, an
+  inline **"Couldn't load more — Retry"** on failure, and the per-tab **empty**
+  state (For You vs Following copy). Because the pagers swallow fetch errors to
+  keep their guarded no-throw contract, a failed page is signalled **without
+  throwing** via `FeedPage.failure` (`error: true`, `hasMore: true` so a retry
+  is offered); under the tests/offline path an uninitialized client is a no-op
+  returning `FeedPage.empty` instead.
+
+> **Environment risk — live queries UNVERIFIED.** The live keyset `.or(...)`
+> predicate and the following-scoped `owner in (...)` query (and the
+> FEAT-013 self-embed join) are **UNVERIFIED** against a real Supabase in this
+> environment (no reachable/administerable project) and are validated by
+> **structural review only**. The mock/offline path is fully exercised by unit
+> tests; both pagers are guarded no-ops returning `FeedPage.empty` there.
 
 ## Stories (24h ephemeral)
 

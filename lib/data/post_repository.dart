@@ -96,7 +96,10 @@ class PostRepository extends ChangeNotifier {
     try {
       final rows = await supabase
           .from('posts')
-          .select('*, profiles(*), post_attachments(*), reactions(type)')
+          // Fetch the quoted post ONE LEVEL deep via the FK-named self-embed
+          // hint, aliased `quoted` (see _feedSelect). UNVERIFIED against live
+          // PostgREST (env risk); mapPostRow tolerates its absence gracefully.
+          .select(_feedSelect)
           .order('created_at', ascending: false)
           .order('id', ascending: false)
           .limit(kFeedPageSize);
@@ -115,47 +118,196 @@ class PostRepository extends ChangeNotifier {
     }
   }
 
+  // The PostgREST select the feed queries share (main row + profile author,
+  // ordered attachments, un-aggregated reactions, and the one-level quoted
+  // self-embed added by FEAT-013). Centralized so load/loadMore/loadMoreFollowing
+  // stay identical.
+  static const String _feedSelect =
+      '*, profiles(*), post_attachments(*), reactions(type), '
+      'quoted:quoted_post_id(*, profiles(*), post_attachments(*))';
+
+  /// Builds the PostgREST `.or(...)` keyset predicate string for [cursor].
+  ///
+  /// Expresses `(created_at, id) < (cursor.createdAt, cursor.id)` as an `or`
+  /// composite over the `(created_at desc, id)` index:
+  /// `created_at.lt.<iso>,and(created_at.eq.<iso>,id.lt.<id>)`. This is the
+  /// seek predicate shared by [loadMore] and [loadMoreFollowing]; extracted as
+  /// a pure static so the exact string is unit-testable and the two pagers
+  /// cannot drift. The timestamp is normalized to UTC ISO-8601 to match how
+  /// Postgres stores/compares `timestamptz`. UNVERIFIED against live PostgREST
+  /// (env risk); validated by structural review + a string-shape unit test.
+  static String keysetPredicate(FeedCursor cursor) {
+    final iso = cursor.createdAt.toUtc().toIso8601String();
+    return 'created_at.lt.$iso,and(created_at.eq.$iso,id.lt.${cursor.id})';
+  }
+
+  /// Returns the cursor for the post that sorts LAST under the feed's keyset
+  /// order `(created_at desc, id desc)` — i.e. the OLDEST post, with the
+  /// smallest `id` as the tie-break among equal timestamps — or null for an
+  /// empty list.
+  ///
+  /// This is the TRUE keyset frontier of a set of loaded posts, computed purely
+  /// from the ordering key and DELIBERATELY INDEPENDENT of any display ranking.
+  /// The pager seeds its cursor from this over the initial cache and thereafter
+  /// threads [FeedPage.nextCursor]; paging off this (not the ranked display
+  /// tail) means a non-chronological strategy like [EngagementRanking] cannot
+  /// corrupt pagination. Pure + static so it is unit-testable without Supabase.
+  static FeedCursor? keysetMinCursor(List<Post> posts) {
+    if (posts.isEmpty) return null;
+    FeedCursor? min;
+    for (final p in posts) {
+      final c = FeedCursor.fromPost(p);
+      // compareTo > 0 means `c` sorts AFTER (is older / later in the feed than)
+      // the current min, so it becomes the new keyset tail.
+      if (min == null || c.compareTo(min) > 0) min = c;
+    }
+    return min;
+  }
+
+  /// Filters [fetched] down to the posts whose ids are not already present in
+  /// [existing], preserving order. This is the NO-DUPLICATE guarantee for the
+  /// append path, extracted as a pure static so it is testable without booting
+  /// Supabase.
+  static List<Post> freshPosts(List<Post> fetched, Set<String> existing) {
+    return fetched.where((p) => !existing.contains(p.id)).toList();
+  }
+
   /// Fetches the next bounded page after [cursor] using a keyset predicate.
   ///
   /// Uses `(created_at, id) < (cursor.createdAt, cursor.id)` expressed as an
-  /// `or` composite over the `(created_at desc, id)` index. This is seek-based,
-  /// never `offset`-based (which degrades at scale), and is bounded to
-  /// [kFeedPageSize]. Newly fetched rows are appended to the cache (de-duped by
-  /// id) and a single [notifyListeners] fires only when real rows arrive.
-  /// Returns a [FeedPage] describing the fetched rows; returns [FeedPage.empty]
-  /// when Supabase is unavailable or there is nothing more to load.
+  /// `or` composite over the `(created_at desc, id)` index (see
+  /// [keysetPredicate]). This is seek-based, never `offset`-based (which
+  /// degrades at scale), and is bounded to [kFeedPageSize]. Newly fetched rows
+  /// are appended to the cache (de-duped by id via [freshPosts]) and a single
+  /// [notifyListeners] fires only when real rows arrive. Returns a [FeedPage]
+  /// whose [FeedPage.nextCursor] is the KEYSET tail of the fetched page
+  /// (`mapped.last`, because the query orders `created_at desc, id desc`);
+  /// returns [FeedPage.empty] when there is nothing more to load, or
+  /// [FeedPage.failure] when the fetch itself failed (so the UI can offer a
+  /// retry). Used by the For You tab (global, no author filter).
   Future<FeedPage> loadMore(FeedCursor cursor) async {
     try {
-      final iso = cursor.createdAt.toUtc().toIso8601String();
       final rows = await supabase
           .from('posts')
-          .select('*, profiles(*), post_attachments(*), reactions(type)')
-          .or(
-            'created_at.lt.$iso,'
-            'and(created_at.eq.$iso,id.lt.${cursor.id})',
-          )
+          .select(_feedSelect)
+          .or(keysetPredicate(cursor))
           .order('created_at', ascending: false)
           .order('id', ascending: false)
           .limit(kFeedPageSize);
-      final data = (rows as List).cast<Map<String, dynamic>>();
-      if (data.isEmpty) return FeedPage.empty;
-      final viewer = await _viewerEngagement();
-      final mapped =
-          data.map((row) => _postFromRow(row, viewer: viewer)).toList();
-      final existingIds = _posts.map((p) => p.id).toSet();
-      final fresh = mapped.where((p) => !existingIds.contains(p.id)).toList();
-      if (fresh.isNotEmpty) {
-        _posts.addAll(fresh);
-        notifyListeners();
-      }
-      return FeedPage(
-        posts: mapped,
-        nextCursor: FeedCursor.fromPost(mapped.last),
-        hasMore: mapped.length == kFeedPageSize,
-      );
+      return await _appendPage(rows);
     } catch (_) {
-      // Supabase unavailable/unauthenticated or query failed: no more rows.
-      return FeedPage.empty;
+      // Supabase unavailable/unauthenticated or query failed. Distinguish an
+      // uninitialized-client no-op (tests/offline) from a real failure so the
+      // guarded no-throw contract holds while the UI can still surface a retry.
+      return _errorOrEmpty();
+    }
+  }
+
+  /// Fetches the next bounded page after [cursor] scoped to the authors the
+  /// viewer follows, for the Following tab.
+  ///
+  /// Applies the SAME keyset predicate as [loadMore] AND an author filter
+  /// `owner in (<followed ids>)`, so a sparse Following feed does not exhaust
+  /// the global page window on non-followed authors and STALL before reaching
+  /// older followed posts (the second review follow-up). The followed author id
+  /// set is fetched via [_followedAuthorIds] (guarded); under the mock/offline
+  /// path — or when the set is empty — this is a no-op returning
+  /// [FeedPage.empty], exactly like [loadMore] when Supabase is unavailable.
+  /// Bounded to [kFeedPageSize], fire-and-forget-guarded, de-duped by id on
+  /// append, single-notify. The live `owner in (...)` query is UNVERIFIED
+  /// against a real Supabase (env risk) and validated by structural review.
+  Future<FeedPage> loadMoreFollowing(FeedCursor cursor) async {
+    try {
+      // A genuinely-empty follow set is legitimate end-of-feed
+      // ([FeedPage.empty]); a FAILED follows lookup (when Supabase is
+      // initialized) throws out of [_followedAuthorIds] and is caught below,
+      // routing to [_errorOrEmpty] so the retry footer fires instead of a
+      // false "You're all caught up". Under tests/offline the lookup returns
+      // empty (no throw), keeping the guarded no-throw contract intact.
+      final authorIds = await _followedAuthorIds();
+      if (authorIds.isEmpty) return FeedPage.empty;
+      final rows = await supabase
+          .from('posts')
+          .select(_feedSelect)
+          .or(keysetPredicate(cursor))
+          .inFilter('owner', authorIds.toList())
+          .order('created_at', ascending: false)
+          .order('id', ascending: false)
+          .limit(kFeedPageSize);
+      return await _appendPage(rows);
+    } catch (_) {
+      return _errorOrEmpty();
+    }
+  }
+
+  /// Maps a raw PostgREST page result, appends the de-duped fresh rows to the
+  /// cache with a single notify, and returns the describing [FeedPage] whose
+  /// [FeedPage.nextCursor] is the keyset tail (`mapped.last`). Shared by
+  /// [loadMore] and [loadMoreFollowing] so the append/dedupe/cursor logic is
+  /// identical. Returns [FeedPage.empty] for an empty result.
+  Future<FeedPage> _appendPage(Object? rows) async {
+    final data = (rows as List).cast<Map<String, dynamic>>();
+    if (data.isEmpty) return FeedPage.empty;
+    final viewer = await _viewerEngagement();
+    final mapped =
+        data.map((row) => _postFromRow(row, viewer: viewer)).toList();
+    final existingIds = _posts.map((p) => p.id).toSet();
+    final fresh = freshPosts(mapped, existingIds);
+    if (fresh.isNotEmpty) {
+      _posts.addAll(fresh);
+      notifyListeners();
+    }
+    return FeedPage(
+      posts: mapped,
+      nextCursor: FeedCursor.fromPost(mapped.last),
+      hasMore: mapped.length == kFeedPageSize,
+    );
+  }
+
+  /// Decides how a failed fetch is reported. When Supabase is not initialized
+  /// (tests/offline) there is nothing to load and no error to surface, so this
+  /// returns [FeedPage.empty] (preserving the mock-fallback no-op). When the
+  /// client IS initialized the failure is real (network/query), so it returns
+  /// [FeedPage.failure] carrying the error signal for the retry footer —
+  /// WITHOUT throwing, keeping the guarded contract intact.
+  FeedPage _errorOrEmpty() {
+    return isSupabaseInitialized ? FeedPage.failure : FeedPage.empty;
+  }
+
+  /// The set of author ids the viewer follows, used to scope
+  /// [loadMoreFollowing]. Reads the `follows` table (accepted edges) when
+  /// Supabase is reachable.
+  ///
+  /// FAILURE vs EMPTY: this distinguishes an uninitialized-client no-op from a
+  /// real lookup failure so the Following pager does not fail OPEN to
+  /// end-of-feed. When Supabase is NOT initialized (tests/offline) it returns
+  /// an EMPTY set (a no-op) that keeps the guarded no-throw contract and the
+  /// offline pagination tests intact, mirroring how the synchronous [following]
+  /// getter derives its subset from MockData. When the client IS initialized
+  /// but the `follows` query THROWS, the error is RETHROWN so the caller's
+  /// guard routes to [_errorOrEmpty] ([FeedPage.failure], the retry path),
+  /// rather than being swallowed into an empty set that would look identical to
+  /// "follows nobody". A no-authenticated-user is treated as a legitimately
+  /// empty follow set.
+  Future<Set<String>> _followedAuthorIds() async {
+    if (!isSupabaseInitialized) return const <String>{};
+    try {
+      final userId = supabase.auth.currentUser?.id;
+      if (userId == null) return const <String>{};
+      final rows = await supabase
+          .from('follows')
+          .select('following_id')
+          .eq('follower_id', userId)
+          .eq('status', 'accepted');
+      return (rows as List)
+          .map((r) => (r as Map)['following_id']?.toString() ?? '')
+          .where((id) => id.isNotEmpty)
+          .toSet();
+    } catch (_) {
+      // Initialized but the query failed (network/query error): surface it as a
+      // real failure so [loadMoreFollowing] returns [FeedPage.failure] and the
+      // UI shows a retry, instead of a false end-of-feed.
+      rethrow;
     }
   }
 
@@ -406,6 +558,8 @@ class PostRepository extends ChangeNotifier {
         'media_url': post.mediaUrl,
         'media_type': post.mediaType.name,
         'kind': post.kind.name,
+        // QUOTE-POST durable FK (null for a normal post). See migration 0010.
+        'quoted_post_id': post.quotedPostId,
         // Optional free-text location tag (Phase 3). A real place-picker /
         // geocoder that also fills lat/lng is a Phase 4/5 seam.
         'location': post.location,
@@ -579,6 +733,7 @@ class PostRepository extends ChangeNotifier {
     Set<String> likedIds = const <String>{},
     Set<String> repostedIds = const <String>{},
     Set<String> reactedIds = const <String>{},
+    bool embedQuoted = true,
   }) {
     final id = row['id']?.toString() ?? '';
     final attachments = _attachmentsFromRow(id, row);
@@ -596,8 +751,36 @@ class PostRepository extends ChangeNotifier {
             (likedIds.contains(id) || reactedIds.contains(id)
                 ? ReactionType.like
                 : null);
+    // QUOTE-POST: read the durable FK, and hydrate a ONE-LEVEL-DEEP embed from
+    // the aliased `quoted` self-join when present. The embedded post is mapped
+    // with `embedQuoted: false` so it NEVER re-hydrates its own quoted post
+    // (one-level cap, no unbounded nesting). Absence of the join is tolerated
+    // gracefully: quotedPost stays null (unavailable / not-viewable case), and
+    // the quotedPostId FK still round-trips. NOTE: the aliased self-embed shape
+    // (`quoted:quoted_post_id(...)`) is UNVERIFIED against live PostgREST (env
+    // risk) — the mapper reads whatever nested object is present under
+    // `quoted` and otherwise leaves the embed null.
+    final quotedPostId = row['quoted_post_id']?.toString();
+    Post? quotedPost;
+    if (embedQuoted) {
+      final quotedRaw = row['quoted'];
+      if (quotedRaw is Map) {
+        quotedPost = mapPostRow(
+          quotedRaw.cast<String, dynamic>(),
+          viewerReactions: viewerReactions,
+          likedIds: likedIds,
+          repostedIds: repostedIds,
+          reactedIds: reactedIds,
+          embedQuoted: false,
+        );
+      }
+    }
     return Post(
       id: id,
+      quotedPostId: (quotedPostId != null && quotedPostId.isNotEmpty)
+          ? quotedPostId
+          : null,
+      quotedPost: quotedPost,
       author: _authorFromRow(row['profiles']),
       content: (row['content'] as String?) ?? '',
       location: row['location'] as String?,
