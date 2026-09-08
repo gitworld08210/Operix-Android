@@ -2,6 +2,8 @@ import '../models/comment.dart';
 import '../models/conversation.dart';
 import '../models/notification_item.dart';
 import '../models/post.dart';
+import '../models/post_attachment.dart';
+import '../models/story.dart';
 import '../models/user_profile.dart';
 
 /// Static seed data used by the in-memory repositories. All image URLs point at
@@ -121,6 +123,19 @@ abstract final class MockData {
   /// assertions must not shift). The keyword-mute surface (FEAT-007) reads and
   /// writes this list; it is client-authoritative and in-memory only.
   static Set<String> muteWords() => <String>{};
+
+  /// Seed set of post ids the current user has SAVED/bookmarked. Deliberately
+  /// EMPTY so an empty [SaveRepository] leaves the default feed unchanged
+  /// (existing bookmark/feed assertions must not shift). Saves are server-backed
+  /// (public.saves); this is only the offline/mock seed.
+  static Set<String> savedPostIds() => <String>{};
+
+  /// Seed set of comment ids the current user has LIKED. Deliberately EMPTY so
+  /// an empty viewer comment-like state leaves the seeded [comments] like
+  /// counts unchanged (existing comment_repository_test.dart assertions must
+  /// not shift). Comment likes are server-backed (public.comment_likes, added
+  /// in migration 0008); this is only the offline/mock seed.
+  static Set<String> likedCommentIds() => <String>{};
 
   // -- Relationships (follow edges / requests) -----------------------------
 
@@ -269,6 +284,47 @@ abstract final class MockData {
         likeCount: 210,
         viewCount: 9800,
       ),
+      // p11: a MULTI-IMAGE CAROUSEL post exercising the polymorphic content
+      // model (kind is derived as PostKind.carousel from >1 attachment). Placed
+      // LAST with the OLDEST createdAt so the newest-first feed ordering and
+      // the existing p1..p10 order/count assertions in post_repository_test.dart
+      // are unaffected. `marco` (not aria/jules) keeps the Following tab subset
+      // unchanged. Attachments are carried BY URL (picsum placeholders) — real
+      // capture/upload is Phase 4 (see PostAttachment's PHASE 4 SEAM note). kind
+      // is derived automatically by the Post constructor via deriveKind.
+      Post(
+        id: 'p11',
+        author: marco,
+        content: 'A few frames from the harbor series. Swipe through. #photography',
+        attachments: const <PostAttachment>[
+          PostAttachment(
+            id: 'p11_a0',
+            postId: 'p11',
+            position: 0,
+            type: AttachmentType.image,
+            url: 'https://picsum.photos/seed/harbor1/900/600',
+          ),
+          PostAttachment(
+            id: 'p11_a1',
+            postId: 'p11',
+            position: 1,
+            type: AttachmentType.image,
+            url: 'https://picsum.photos/seed/harbor2/900/600',
+          ),
+          PostAttachment(
+            id: 'p11_a2',
+            postId: 'p11',
+            position: 2,
+            type: AttachmentType.image,
+            url: 'https://picsum.photos/seed/harbor3/900/600',
+          ),
+        ],
+        createdAt: now.subtract(const Duration(days: 1, hours: 6)),
+        replyCount: 9,
+        repostCount: 12,
+        likeCount: 430,
+        viewCount: 15600,
+      ),
     ];
   }
 
@@ -278,6 +334,73 @@ abstract final class MockData {
     return all
         .where((p) => p.author.id == aria.id || p.author.id == jules.id)
         .toList();
+  }
+
+  // -- Stories (24h ephemeral) ---------------------------------------------
+
+  /// Seed of ephemeral stories for the in-memory [StoryRepository] and the unit
+  /// tests. Kept INDEPENDENT of [posts]/[comments]/[notifications] so no
+  /// existing feed/comment/notification assertion shifts.
+  ///
+  /// Most seeds are ACTIVE: `createdAt = now - 2h` with the default 24h TTL, so
+  /// they expire ~22h in the future. They span several existing profiles (aria,
+  /// nova, marco) plus the current user, with a mix of seen/unseen so the
+  /// story-ring's unseen-vs-seen affordance is exercised. The LAST entry is an
+  /// already-EXPIRED story (created 26h ago, so `expiresAt` is ~2h in the past)
+  /// so the `isActive` filter is exercised by tests and never surfaces it.
+  static List<Story> stories() {
+    final now = DateTime.now();
+    return <Story>[
+      // Current user's own active story (own tile shown first in the ring).
+      Story.ephemeral(
+        id: 's_me1',
+        author: currentUser,
+        mediaUrl: 'https://picsum.photos/seed/story_me1/720/1280',
+        createdAt: now.subtract(const Duration(hours: 1)),
+        seen: false,
+      ),
+      // Aria: two active stories, chronological within her group.
+      Story.ephemeral(
+        id: 's_aria1',
+        author: aria,
+        mediaUrl: 'https://picsum.photos/seed/story_aria1/720/1280',
+        createdAt: now.subtract(const Duration(hours: 3)),
+        seen: false,
+      ),
+      Story.ephemeral(
+        id: 's_aria2',
+        author: aria,
+        mediaUrl: 'https://picsum.photos/seed/story_aria2/720/1280',
+        createdAt: now.subtract(const Duration(hours: 2)),
+        seen: false,
+      ),
+      // Nova: an active story already SEEN (its ring renders muted/gray).
+      Story.ephemeral(
+        id: 's_nova1',
+        author: nova,
+        mediaUrl: 'https://picsum.photos/seed/story_nova1/720/1280',
+        type: StoryMediaType.video,
+        createdAt: now.subtract(const Duration(hours: 4)),
+        seen: true,
+      ),
+      // Marco: an active unseen story.
+      Story.ephemeral(
+        id: 's_marco1',
+        author: marco,
+        mediaUrl: 'https://picsum.photos/seed/story_marco1/720/1280',
+        createdAt: now.subtract(const Duration(hours: 2)),
+        seen: false,
+      ),
+      // An already-EXPIRED story (created 26h ago > 24h TTL): isActive is false,
+      // so it must never appear in activeStoryGroups/activeStoriesFor.
+      Story.ephemeral(
+        id: 's_marco_expired',
+        author: marco,
+        mediaUrl: 'https://picsum.photos/seed/story_expired/720/1280',
+        createdAt: now.subtract(const Duration(hours: 26)),
+        seen: false,
+      ),
+    ];
   }
 
   // -- Comments ------------------------------------------------------------

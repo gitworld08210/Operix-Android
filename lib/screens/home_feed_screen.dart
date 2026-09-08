@@ -9,6 +9,7 @@ import '../theme/app_text_styles.dart';
 import '../widgets/app_scaffold.dart';
 import '../widgets/avatar.dart';
 import '../widgets/post_card.dart';
+import '../widgets/story_ring.dart';
 import 'comments_screen.dart';
 
 /// Home timeline with 'For You' / 'Following' tabs, wired to
@@ -81,17 +82,27 @@ class _HomeFeedScreenState extends State<HomeFeedScreen>
           ),
         ),
       ),
-      body: AnimatedBuilder(
-        animation: PostRepository.instance,
-        builder: (context, _) {
-          return TabBarView(
-            controller: _tabController,
-            children: const <Widget>[
-              _FeedList(feed: _FeedKind.forYou),
-              _FeedList(feed: _FeedKind.following),
-            ],
-          );
-        },
+      // The story ring sits ABOVE the TabBarView (rendered once for both tabs)
+      // so it never interferes with the infinite-scroll ListView pagination in
+      // either feed. It manages its own AnimatedBuilder over StoryRepository.
+      body: Column(
+        children: <Widget>[
+          const StoryRing(),
+          Expanded(
+            child: AnimatedBuilder(
+              animation: PostRepository.instance,
+              builder: (context, _) {
+                return TabBarView(
+                  controller: _tabController,
+                  children: const <Widget>[
+                    _FeedList(feed: _FeedKind.forYou),
+                    _FeedList(feed: _FeedKind.following),
+                  ],
+                );
+              },
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -189,6 +200,8 @@ class _FeedListState extends State<_FeedList> {
         return PostCard(
           post: post,
           onLike: () => repo.toggleLike(post.id),
+          onReact: (type) => repo.react(post.id, type),
+          onClearReaction: () => repo.clearReaction(post.id),
           onRepost: () => repo.toggleRepost(post.id),
           onBookmark: () => repo.toggleBookmark(post.id),
           onReply: () => _openComments(context, post),

@@ -36,7 +36,8 @@ class CommentValidationError implements Exception {
 ///    throws into the UI.
 class CommentRepository extends ChangeNotifier {
   CommentRepository()
-      : _comments = MockData.comments() {
+      : _comments = MockData.comments(),
+        _likedCommentIds = Set<String>.of(MockData.likedCommentIds()) {
     // Hydrate from Supabase in the background. Guarded so it is a no-op when
     // Supabase is unavailable (tests / offline), leaving the mock seed intact.
     // ignore: discarded_futures
@@ -51,6 +52,16 @@ class CommentRepository extends ChangeNotifier {
   static const int maxContentLength = 2000;
 
   final List<Comment> _comments;
+
+  /// The viewer's own liked comment ids. Seeded from
+  /// [MockData.likedCommentIds] (EMPTY by default so the seeded like counts are
+  /// untouched) and hydrated from `public.comment_likes` by [load]. This is the
+  /// per-viewer toggle state; the aggregate `comments.like_count` is server
+  /// owned (see [toggleCommentLike] / [_persistCommentLike]).
+  final Set<String> _likedCommentIds;
+
+  /// Whether the viewer has liked the comment [commentId].
+  bool isCommentLiked(String commentId) => _likedCommentIds.contains(commentId);
 
   /// Comments for [postId], newest-first (threaded replies keep their relative
   /// order but the list is a flat newest-first view; the UI groups replies by
@@ -87,11 +98,40 @@ class CommentRepository extends ChangeNotifier {
       _comments
         ..clear()
         ..addAll(mapped);
+      // Hydrate the viewer's own comment likes so tapped hearts render as
+      // liked after a load. Guarded with a setEquals change-check so it only
+      // notifies when the viewer's like set actually changes.
+      await _hydrateViewerCommentLikes();
       notifyListeners();
     } catch (_) {
       // Supabase unavailable/unauthenticated or query failed: keep the mock
       // seed. Never throw into construction or the UI.
     }
+  }
+
+  /// Reads the signed-in viewer's own `comment_likes` rows into
+  /// [_likedCommentIds]. The per-viewer liked flag is NOT denormalized onto
+  /// `comments` (it derives from the join table), so without this a comment the
+  /// viewer already liked would render un-liked after a [load]. Fully guarded
+  /// and a no-op (no throw, no notify) when Supabase is unavailable or the
+  /// viewer is unauthenticated. The caller ([load]) fires the single notify;
+  /// this method only mutates the set when it actually differs (setEquals
+  /// change-guard) so an offline load stays a zero-notification no-op.
+  Future<void> _hydrateViewerCommentLikes() async {
+    final userId = supabase.auth.currentUser?.id;
+    if (userId == null) return;
+    final rows = await supabase
+        .from('comment_likes')
+        .select('comment_id')
+        .eq('user_id', userId);
+    final liked = (rows as List)
+        .map((r) => (r as Map)['comment_id']?.toString() ?? '')
+        .where((id) => id.isNotEmpty)
+        .toSet();
+    if (setEquals(_likedCommentIds, liked)) return;
+    _likedCommentIds
+      ..clear()
+      ..addAll(liked);
   }
 
   /// Adds a comment to [postId] optimistically and persists it.
@@ -130,6 +170,38 @@ class CommentRepository extends ChangeNotifier {
     return comment;
   }
 
+  /// Toggles the viewer's like on [commentId] optimistically. Returns the
+  /// updated [Comment], or null for an unknown id.
+  ///
+  /// Mirrors [PostRepository.toggleLike]: it flips the per-viewer liked flag
+  /// and moves the DISPLAY [Comment.likeCount] by +/-1, firing exactly one
+  /// [notifyListeners]. The `comments.like_count` aggregate is SERVER OWNED
+  /// (recomputed from `public.comment_likes` by the `sync_comment_like_count`
+  /// trigger in migration 0008); the client NEVER writes it. The optimistic
+  /// +/-1 here is therefore a display-only estimate that the next [load]
+  /// reconciles against the authoritative count. Persistence is a separate
+  /// guarded fire-and-forget insert/delete on `public.comment_likes` that
+  /// never throws into the UI.
+  Comment? toggleCommentLike(String commentId) {
+    final i = _comments.indexWhere((c) => c.id == commentId);
+    if (i < 0) return null;
+    final current = _comments[i];
+    final nowLiked = !_likedCommentIds.contains(commentId);
+    if (nowLiked) {
+      _likedCommentIds.add(commentId);
+    } else {
+      _likedCommentIds.remove(commentId);
+    }
+    final updated = current.copyWith(
+      likeCount: current.likeCount + (nowLiked ? 1 : -1),
+    );
+    _comments[i] = updated;
+    notifyListeners();
+    // ignore: discarded_futures
+    _persistCommentLike(commentId, liked: nowLiked);
+    return updated;
+  }
+
   // -- Supabase persistence (fire-and-forget, fully guarded) ---------------
 
   /// Inserts a new comment into the Supabase `comments` table.
@@ -152,6 +224,39 @@ class CommentRepository extends ChangeNotifier {
       });
     } catch (_) {
       // Ignore persistence failures; the optimistic in-memory comment stands.
+    }
+  }
+
+  /// Reflects a comment-like toggle into the `public.comment_likes` join table
+  /// only, keyed by `(user_id = auth.uid(), comment_id)`.
+  ///
+  /// The aggregate `comments.like_count` is owned by the database: the
+  /// `sync_comment_like_count` trigger (migration 0008) recomputes it from
+  /// `count(*)` over `comment_likes` on every insert/delete. The client
+  /// deliberately does NOT write that count here (which would race with
+  /// concurrent clients); it only records the viewer's like/un-like and lets
+  /// the server reconcile. The optimistic +/-1 applied in [toggleCommentLike]
+  /// is a display-only estimate until the next [load]. Mirrors
+  /// `PostRepository._persistLike`/`_persistReaction`; guarded/no-op when
+  /// Supabase is unavailable.
+  Future<void> _persistCommentLike(String commentId, {required bool liked}) async {
+    try {
+      final userId = supabase.auth.currentUser?.id;
+      if (userId == null) return;
+      if (liked) {
+        await supabase.from('comment_likes').insert(<String, dynamic>{
+          'user_id': userId,
+          'comment_id': commentId,
+        });
+      } else {
+        await supabase
+            .from('comment_likes')
+            .delete()
+            .eq('user_id', userId)
+            .eq('comment_id', commentId);
+      }
+    } catch (_) {
+      // Ignore persistence failures; the optimistic in-memory state stands.
     }
   }
 

@@ -6,10 +6,12 @@ import '../data/post_repository.dart';
 import '../data/profile_repository.dart';
 import '../data/storage_service.dart';
 import '../models/post.dart';
+import '../models/post_attachment.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
 import '../theme/app_theme.dart';
 import '../utils/ids.dart';
+import '../utils/text_entities.dart';
 import '../widgets/avatar.dart';
 
 /// Full-screen compose route. Building a [Post] from the current profile and
@@ -23,8 +25,25 @@ class ComposeScreen extends StatefulWidget {
 
 class _ComposeScreenState extends State<ComposeScreen> {
   final TextEditingController _controller = TextEditingController();
+  // PHASE 4/5 SEAM: a free-text location this phase. A real place-picker /
+  // geocoder (resolving to a place name + lat/lng) replaces this input later.
+  final TextEditingController _locationController = TextEditingController();
   static const int _maxChars = 280;
   int _length = 0;
+
+  /// Ordered image attachments assembled for this compose (carried BY URL).
+  /// See [_attachDemoPhoto] and the PHASE 4 SEAM note there.
+  final List<PostAttachment> _attachments = <PostAttachment>[];
+
+  /// A small fixed pool of demo picsum seeds used to append URL-based image
+  /// attachments without a device picker (see the PHASE 4 SEAM in
+  /// [_attachDemoPhoto]).
+  static const List<String> _demoPhotoSeeds = <String>[
+    'compose1',
+    'compose2',
+    'compose3',
+    'compose4',
+  ];
 
   @override
   void initState() {
@@ -37,26 +56,83 @@ class _ComposeScreenState extends State<ComposeScreen> {
   @override
   void dispose() {
     _controller.dispose();
+    _locationController.dispose();
     super.dispose();
   }
 
-  bool get _canPost => _length > 0 && _length <= _maxChars;
+  // A post is postable when it has text OR at least one attachment, and the
+  // text is within the character limit. Attachments alone (e.g. an image-only
+  // carousel) are enough to post.
+  bool get _canPost =>
+      (_length > 0 || _attachments.isNotEmpty) && _length <= _maxChars;
 
   void _post() {
     if (!_canPost) return;
     final user = ProfileRepository.instance.currentUser;
+    // A client-generated UUID so the in-memory id equals the persisted DB row
+    // id (the posts.id uuid column accepts it). See utils/ids.dart.
+    final id = newUuidV4();
+    // Re-key the assembled attachments onto the final post id and their
+    // ordering, so the persisted post_attachments rows reference the post and
+    // carry a stable (post_id, position). The Post constructor derives `kind`
+    // from this list via deriveKind (0 => text, 1 image => image, >1 =>
+    // carousel), so kind and attachments never disagree.
+    final attachments = <PostAttachment>[
+      for (var i = 0; i < _attachments.length; i++)
+        _attachments[i].copyWith(id: '${id}_a$i', postId: id, position: i),
+    ];
+    final content = _controller.text.trim();
+    final location = _locationController.text.trim();
     final post = Post(
-      // A client-generated UUID so the in-memory id equals the persisted DB
-      // row id (the posts.id uuid column accepts it). See utils/ids.dart.
-      id: newUuidV4(),
+      id: id,
       author: user,
-      content: _controller.text.trim(),
+      content: content,
+      attachments: attachments,
       createdAt: DateTime.now(),
+      // PHASE 4/5 SEAM: free-text location now; a place-picker/geocoder later
+      // resolves lat/lng.
+      location: location.isEmpty ? null : location,
     );
-    // addPost updates the in-memory feed immediately and persists the post to
-    // the Supabase `posts` table in the background (fire-and-forget).
-    PostRepository.instance.addPost(post);
+    // Extract the discovery entities from the caption using the SAME grammar
+    // the card linkifier highlights (see utils/text_entities.dart), so the
+    // post_hashtags/post_mentions relations match what the user sees.
+    final hashtags = extractHashtags(content);
+    final mentions = extractMentions(content);
+    // addPost updates the in-memory feed immediately and persists the post,
+    // its attachments, and the extracted relations in the background
+    // (fire-and-forget).
+    PostRepository.instance
+        .addPost(post, hashtags: hashtags, mentions: mentions);
     Navigator.of(context).pop();
+  }
+
+  /// Appends a DEMO url-based image attachment so a single image or a
+  /// multi-image CAROUSEL can be assembled and previewed by URL, WITHOUT a
+  /// device picker.
+  ///
+  /// PHASE 4 SEAM: real gallery/camera capture replaces this URL-based demo
+  /// attach. Here attachments are carried BY URL only (picsum placeholders);
+  /// Phase 4 wires a real picker + upload to the storage bucket that populates
+  /// the attachment url/thumbUrl from device bytes.
+  void _attachDemoPhoto() {
+    final seed = _demoPhotoSeeds[_attachments.length % _demoPhotoSeeds.length];
+    setState(() {
+      _attachments.add(
+        PostAttachment(
+          // Ids/positions are re-keyed onto the final post id in [_post];
+          // these are placeholders for the in-progress preview.
+          id: 'draft_a${_attachments.length}',
+          postId: 'draft',
+          position: _attachments.length,
+          type: AttachmentType.image,
+          url: 'https://picsum.photos/seed/$seed/900/600',
+        ),
+      );
+    });
+  }
+
+  void _removeAttachment(int index) {
+    setState(() => _attachments.removeAt(index));
   }
 
   // ---------------------------------------------------------------------------
@@ -96,17 +172,30 @@ class _ComposeScreenState extends State<ComposeScreen> {
     // Also surface the reel in the main timeline as a video post so it is
     // immediately visible. (A dedicated reels feed reading from the `reels`
     // table is a future step.)
+    final reelId = newUuidV4();
     final reelPost = Post(
-      id: newUuidV4(),
+      id: reelId,
       author: ProfileRepository.instance.currentUser,
       content: caption,
-      mediaUrl: videoUrl,
-      mediaType: MediaType.video,
+      // A reel surfaces as a single-video post: one video attachment (position
+      // 0) whose url is the uploaded video. The Post constructor derives
+      // kind=PostKind.video via deriveKind.
+      attachments: <PostAttachment>[
+        PostAttachment(
+          id: '${reelId}_a0',
+          postId: reelId,
+          position: 0,
+          type: AttachmentType.video,
+          url: videoUrl,
+        ),
+      ],
       createdAt: DateTime.now(),
     );
     PostRepository.instance.addPost(reelPost);
   }
 
+  /// Toolbar affordances that are not part of this phase (GIF, Poll) show a
+  /// clearly-labeled placeholder. Photos routes to [_attachDemoPhoto] instead.
   void _mockAttach(String label) {
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
@@ -148,33 +237,77 @@ class _ComposeScreenState extends State<ComposeScreen> {
             Expanded(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.all(AppSpacing.lg),
-                child: Row(
+                child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: <Widget>[
-                    Avatar(
-                      url: user.avatarUrl,
-                      displayName: user.displayName,
-                      size: 44,
-                    ),
-                    const SizedBox(width: AppSpacing.md),
-                    Expanded(
-                      child: TextField(
-                        controller: _controller,
-                        autofocus: true,
-                        maxLines: null,
-                        minLines: 4,
-                        cursorColor: AppColors.accent,
-                        style: AppTextStyles.body.copyWith(fontSize: 18),
-                        decoration: InputDecoration(
-                          filled: false,
-                          border: InputBorder.none,
-                          enabledBorder: InputBorder.none,
-                          focusedBorder: InputBorder.none,
-                          hintText: "What's happening?",
-                          hintStyle: AppTextStyles.handle.copyWith(fontSize: 18),
-                          contentPadding: EdgeInsets.zero,
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Avatar(
+                          url: user.avatarUrl,
+                          displayName: user.displayName,
+                          size: 44,
                         ),
+                        const SizedBox(width: AppSpacing.md),
+                        Expanded(
+                          child: TextField(
+                            controller: _controller,
+                            autofocus: true,
+                            maxLines: null,
+                            minLines: 4,
+                            cursorColor: AppColors.accent,
+                            style: AppTextStyles.body.copyWith(fontSize: 18),
+                            decoration: InputDecoration(
+                              filled: false,
+                              border: InputBorder.none,
+                              enabledBorder: InputBorder.none,
+                              focusedBorder: InputBorder.none,
+                              hintText: "What's happening?",
+                              hintStyle:
+                                  AppTextStyles.handle.copyWith(fontSize: 18),
+                              contentPadding: EdgeInsets.zero,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (_attachments.isNotEmpty) ...<Widget>[
+                      const SizedBox(height: AppSpacing.md),
+                      _AttachmentStrip(
+                        attachments: _attachments,
+                        onRemove: _removeAttachment,
                       ),
+                    ],
+                    const SizedBox(height: AppSpacing.md),
+                    // PHASE 4/5 SEAM: a free-text location field. A real
+                    // place-picker/geocoder replaces this later, filling a
+                    // place name + lat/lng.
+                    Row(
+                      children: <Widget>[
+                        const Icon(
+                          Icons.place_outlined,
+                          size: 20,
+                          color: AppColors.accent,
+                        ),
+                        const SizedBox(width: AppSpacing.sm),
+                        Expanded(
+                          child: TextField(
+                            controller: _locationController,
+                            cursorColor: AppColors.accent,
+                            style: AppTextStyles.body,
+                            decoration: InputDecoration(
+                              isDense: true,
+                              filled: false,
+                              border: InputBorder.none,
+                              enabledBorder: InputBorder.none,
+                              focusedBorder: InputBorder.none,
+                              hintText: 'Add location',
+                              hintStyle: AppTextStyles.handle,
+                              contentPadding: EdgeInsets.zero,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ),
@@ -184,6 +317,7 @@ class _ComposeScreenState extends State<ComposeScreen> {
               length: _length,
               maxChars: _maxChars,
               onAttach: _mockAttach,
+              onAddPhoto: _attachDemoPhoto,
             ),
           ],
         ),
@@ -197,11 +331,13 @@ class _Toolbar extends StatelessWidget {
     required this.length,
     required this.maxChars,
     required this.onAttach,
+    required this.onAddPhoto,
   });
 
   final int length;
   final int maxChars;
   final void Function(String label) onAttach;
+  final VoidCallback onAddPhoto;
 
   @override
   Widget build(BuildContext context) {
@@ -218,7 +354,10 @@ class _Toolbar extends StatelessWidget {
       child: Row(
         children: <Widget>[
           IconButton(
-            onPressed: () => onAttach('Photos'),
+            // PHASE 4 SEAM: real gallery/camera capture replaces this
+            // URL-based demo attach. For now this appends a demo picsum image
+            // attachment so a single image or a carousel can be assembled.
+            onPressed: onAddPhoto,
             icon: const Icon(Icons.image_outlined, color: AppColors.accent),
             tooltip: 'Media',
           ),
@@ -240,6 +379,71 @@ class _Toolbar extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// A horizontal preview strip of the demo image attachments assembled for the
+/// in-progress compose, each with a remove affordance. Attachments are carried
+/// BY URL (see the PHASE 4 SEAM in [_ComposeScreenState._attachDemoPhoto]).
+class _AttachmentStrip extends StatelessWidget {
+  const _AttachmentStrip({required this.attachments, required this.onRemove});
+
+  final List<PostAttachment> attachments;
+  final void Function(int index) onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 96,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: attachments.length,
+        separatorBuilder: (_, __) => const SizedBox(width: AppSpacing.sm),
+        itemBuilder: (context, i) {
+          final attachment = attachments[i];
+          return Stack(
+            children: <Widget>[
+              ClipRRect(
+                borderRadius: BorderRadius.circular(AppRadii.md),
+                child: Image.network(
+                  attachment.url,
+                  width: 96,
+                  height: 96,
+                  fit: BoxFit.cover,
+                  errorBuilder: (context, error, stackTrace) => Container(
+                    width: 96,
+                    height: 96,
+                    color: AppColors.surface,
+                    alignment: Alignment.center,
+                    child: const Icon(
+                      Icons.broken_image_outlined,
+                      color: AppColors.secondaryText,
+                    ),
+                  ),
+                ),
+              ),
+              Positioned(
+                top: 2,
+                right: 2,
+                child: GestureDetector(
+                  onTap: () => onRemove(i),
+                  child: const DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Color(0x99000000),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Padding(
+                      padding: EdgeInsets.all(2),
+                      child: Icon(Icons.close, color: AppColors.white, size: 16),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
   }

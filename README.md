@@ -37,14 +37,190 @@ oneleven_app/
 
 - Bottom navigation shell with 5 destinations: Home, Search, Compose, Notifications, Messages. Compose opens a full-screen modal route; Profile is reachable from the Home top-bar avatar.
 - **Home feed** with **For You / Following** tabs, listing `PostCard`s from `PostRepository`. Like / Repost / Bookmark toggle live counts and filled icons through the repository.
-- **PostCard** mirroring the web design: avatar + content columns, bold display name + verification badge + `@handle` + relative time + more menu, `#hashtag` / `@mention` linkification in X-blue, "Show more" truncation, optional rounded media (image, or a play-icon placeholder for video), and the full action row (Reply, Repost, Like, Views, Bookmark, Share). All `Image.network` calls have loading + error fallbacks so a blocked network never crashes the app.
+- **PostCard** mirroring the web design: avatar + content columns, bold display name + verification badge + `@handle` + relative time + more menu, `#hashtag` / `@mention` linkification in X-blue, "Show more" truncation, optional rounded media (single image, a play-icon placeholder for video, or a swipeable multi-image **carousel** with dot indicators + a `1/N` counter — see **Content model** below), and the full action row (Reply, Repost, Like, Views, Bookmark, Share). All `Image.network` calls have loading + error fallbacks so a blocked network never crashes the app.
 - **Search / Explore:** search field, trending chips, and a "Trends for you" list.
-- **Compose:** author avatar, multiline field, mock media/GIF/poll toolbar, character counter, and a Post button that adds to the feed.
+- **Compose:** author avatar, multiline field, media/GIF/poll toolbar, character counter, and a Post button that adds to the feed. The **Photos** button appends demo URL-based image attachments (so a single-image post or a multi-image carousel can be assembled and previewed) — see the Phase 4 seam in **Content model**.
 - **Notifications:** typed activity rows (like / reply / repost / follow / mention) with unread highlighting and "Mark all read".
 - **Messages + Conversation:** thread list with unread dots, and a chat view with left/right bubbles and a local send composer.
 - **Profile:** banner, overlapping avatar, name + badge, bio, follower/following counts, Edit/Follow button, and Posts / Media tabs.
 
-**Out of scope for this Android app (not built):** Wallet, Premium, Verification purchase flow, Creator Hub, and Live. Media attachment, replies, and share are intentionally mocked (they surface a snackbar).
+**Out of scope for this Android app (not built):** Wallet, Premium, Verification purchase flow, Creator Hub, and Live. GIF/Poll and share are intentionally mocked (they surface a snackbar).
+
+## Content model (polymorphic posts)
+
+Post content is modeled **polymorphically** rather than as a single hardcoded
+media slot, so text, single-image, single-video, and multi-image **carousel**
+posts share one abstraction and new content kinds can be added without
+rewriting every consumer:
+
+- **`PostKind` discriminator** (`text` | `image` | `carousel` | `video`) on
+  `Post`, kept consistent with an **ordered `List<PostAttachment>` attachments**
+  relation via `deriveKind(attachments)` (0 attachments ⇒ `text`; 1 image ⇒
+  `image`; 1 video ⇒ `video`; more than 1 ⇒ `carousel`). The constructor and
+  `copyWith` always derive `kind` from the attachment list, so the two can
+  never disagree.
+- **Compatibility shim:** the legacy `mediaUrl` / `mediaType` / `hasMedia`
+  getters on `Post` are preserved and computed from `attachments.first`, so
+  single-media consumers behave identically.
+- **Backend:** migration `0005_content_attachments.sql` adds `posts.kind` and a
+  `post_attachments` table (indexed by `(post_id, position)`) whose SELECT RLS
+  **inherits the parent post's author visibility** (mirroring the
+  comments/reposts policies from `0002`). The client row-mapper reads the joined
+  `post_attachments` array (ordered by position) and **falls back** to the
+  legacy `media_url` / `media_type` columns for pre-`0005` rows.
+
+> **Phase 4 seam — no real capture/upload yet.** Attachments are carried **by
+> URL/reference** only. There is no device gallery/camera capture of bytes: the
+> mock seed and the compose **Photos** button use hosted picsum placeholder
+> URLs, and each URL is rendered with the existing `Image.network` +
+> loading/error placeholder pattern. Real capture + upload to the storage
+> bucket (populating the attachment URLs from device bytes) is Phase 4; the seam
+> is marked in code with `// PHASE 4 SEAM: ...`.
+
+## Stories (24h ephemeral)
+
+Instagram-style **stories** live at the top of the home feed:
+
+- **Story ring** (`StoryRing`) — a horizontally-scrollable row of author tiles
+  above the For You / Following tabs. A **gradient ring** marks a group with
+  **unseen** stories, a **muted/gray ring** marks an all-seen group, and the
+  current user's **own tile leads** with a `+` add affordance. It rebuilds via
+  an `AnimatedBuilder` over `StoryRepository.instance` and is placed above the
+  `TabBarView` so it never interferes with the feeds' infinite-scroll lists.
+- **Full-screen viewer** (`StoryViewerScreen`) — a tap-through viewer with
+  **segmented progress bars** (Instagram-style): tap right to advance, tap left
+  to go back, with per-story auto-advance driven by a single
+  `AnimationController` (disposed on close). Showing a story marks it **seen**.
+- **Model + repository:** an immutable `Story` (`id`, `author`, `mediaUrl`,
+  `type`, `createdAt`, `expiresAt`, `seen`) with `isActive(now)` and a
+  `Story.ephemeral(ttl: 24h)` factory; `StoryRepository` is a `ChangeNotifier`
+  singleton over a `MockData` seed exposing `activeStoryGroups` (grouped by
+  author, **own group first**, expired stories filtered out), `activeStoriesFor`,
+  and an idempotent single-notify `markSeen`, plus guarded fire-and-forget
+  `load()` / persistence — the same offline-no-op pattern as the other repos.
+- **Backend:** migration `0006_stories.sql` adds `public.stories` (with an
+  `expires_at` expiry column) and a `public.story_views` seen-tracking table.
+  Story SELECT RLS is **author-inherited AND not-expired**
+  (`expires_at > now() and public.can_view_profile(auth.uid(), owner)`),
+  mirroring the comments/reposts visibility pattern; writes are owner-scoped.
+
+> **Media by reference (Phase 4 seam).** Like posts, stories carry media **by
+> URL/reference** only — real device capture/upload lands in Phase 4 (marked in
+> code with `// PHASE 4 SEAM: ...`).
+>
+> **Server-expiry unverified (ENV RISK).** Ephemerality is **client-filtered**
+> via `Story.isActive(now)`; the migration adds the matching server RLS time
+> predicate, but it has **not** been applied/exercised against a live Supabase
+> project here (structural review only). True enforcement needs that server RLS
+> plus a **scheduled sweep** of expired rows (a later ops concern). Treat live
+> expiry/RLS behavior as the largest known risk for this feature.
+
+## Discovery relations (saves, reactions, hashtags, mentions, location)
+
+First-class, **indexed** relations that make a later search/discovery phase
+cheap (migration `0007_relations.sql`):
+
+- **Saves / bookmarks (server-backed).** `SaveRepository` is a `ChangeNotifier`
+  singleton over an in-memory set seeded EMPTY from `MockData.savedPostIds()`,
+  exposing synchronous `isSaved` / `savedIds` and an optimistic single-notify
+  `toggleSave` that persists to `public.saves` (keyed by `(user_id, post_id)`)
+  via a guarded fire-and-forget helper — the same offline-no-op pattern as the
+  other repos. `PostRepository.toggleBookmark` and the `PostCard` bookmark
+  action now drive it (the card reflects `SaveRepository.isSaved`). Indexed by
+  `idx_saves_user (user_id, created_at desc)` for a "my saves" screen.
+- **Richer reactions.** A `ReactionType` of `{like, love, laugh, wow, sad,
+  angry}`; `Post` carries a server-owned `reactionCounts` map plus the viewer's
+  `myReaction`. The legacy `liked` / `likeCount` surface is kept as a
+  **compatibility view** under the **like-implies-liked** rule
+  (`liked == (myReaction == like)`). `PostRepository.react` / `clearReaction`
+  persist to `public.reactions`; `toggleLike` is a thin wrapper over them so the
+  quick like/unlike tap is unchanged. `PostCard` adds a **6-type reaction
+  picker** via **long-press** on the like button (a plain tap stays quick
+  like/unlike). Indexed by `idx_reactions_post_type (post_id, type)`.
+- **Hashtags + mentions (indexed).** A pure, tested extractor
+  (`utils/text_entities.dart`) parses `#hashtags` / `@mentions` from the caption
+  using the SAME grammar the `PostCard` linkifier highlights (normalized,
+  lower-cased, de-duped). On compose these feed `public.hashtags` +
+  `public.post_hashtags` and `public.post_mentions`, indexed by
+  `idx_post_hashtags_hashtag` ("posts for #tag") and `idx_post_mentions_user`
+  ("posts mentioning me").
+- **Location tags.** Compose has an optional **free-text location** field;
+  `posts.location` (+ optional `lat`/`lng`) is added with a partial
+  `idx_posts_location`. A real place-picker / geocoder is a **Phase 4/5 seam**
+  (marked in code); this phase is free text only.
+
+> **Reactions-vs-likes coexistence (no double-counting).** `public.reactions`
+> is the general table and the ONLY client-writable reaction store for all six
+> types **including `like`**. `posts.like_count` is recomputed from
+> `reactions where type='like'` by the new `sync_post_reaction_like_count`
+> trigger. The 0001 `public.likes` table and its `sync_post_like_count` trigger
+> are left **untouched but dormant** (the client no longer writes `likes`), so
+> `like_count` has exactly one writer going forward — there is no
+> double-counting. See the head comment of `0007_relations.sql`.
+>
+> **Reaction-path like notifications (migration `0009_reaction_notify.sql`).**
+> Because the client now writes likes only to `public.reactions`, the 0002
+> `notify_on_like` trigger (which fires on `public.likes`) no longer runs on the
+> going-forward path. `0009_reaction_notify.sql` adds `notify_on_reaction_like`,
+> a trigger on `public.reactions` that mirrors `notify_on_like` exactly for
+> `type='like'` (self-notify guard, `is_blocked` suppression, byte-identical
+> `type='like' + entity_type='post'` payload), so a like made via a reaction
+> notifies the post owner again. Only `like` notifies; the other five affect
+> types are a deliberate, documented later-phase concern.
+>
+> **ENV RISK (largest known risk).** `0007_relations.sql` and
+> `0009_reaction_notify.sql` are **UNVERIFIED**
+> against a live Supabase project (no reachable/administerable instance, no
+> service-role key here) — it has had **structural review only**. Live RLS
+> enforcement, the reaction-count trigger, FK/uniqueness constraints, and index
+> creation must be validated on a real project before relying on them.
+
+## Comment threading + interactive likes
+
+The comments subsystem is now first-class threaded with interactive likes
+(migration `0008_comment_likes.sql`):
+
+- **Nested replies.** A pure, tested assembler
+  (`utils/comment_tree.dart` — `buildThread(List<Comment>)`) groups the flat
+  newest-first comment list into a `CommentNode` tree: top-level comments
+  newest-first, each comment's direct replies nested (also newest-first) under
+  it, and **orphan replies** (a reply whose parent is absent/filtered) surfaced
+  as top-level so nothing a viewer may see is dropped. Visual nesting is
+  clamped to `maxThreadDepth` (2) while the underlying data nesting is
+  preserved. `comments_screen` renders `flattenThread(buildThread(...))`,
+  indenting each tile by `CommentNode.depth`.
+- **Reply affordance.** Each comment tile has a **Reply** button that focuses
+  the composer and shows a `Replying to @handle · cancel` banner above it;
+  sending calls `CommentRepository.addComment(postId, text, parentId:)` so the
+  reply is stored with its `parent_id` and nests under the parent on the next
+  `buildThread`.
+- **Interactive comment likes.** `CommentRepository` exposes
+  `isCommentLiked(id)` + an optimistic single-notify `toggleCommentLike(id)`
+  that flips the viewer's liked flag and adjusts the **display** `like_count`
+  by +/-1, mirroring `PostRepository.toggleLike`. The viewer's like set is
+  seeded EMPTY from `MockData.likedCommentIds()` and hydrated from
+  `public.comment_likes` by `load` (a `setEquals` change-guard keeps offline a
+  zero-notify no-op). The client records only the join row (insert/delete keyed
+  by `(user_id, comment_id)`) and **never writes `comments.like_count`**.
+- **Server-owned count.** `comments.like_count` is recomputed from `count(*)`
+  over `public.comment_likes` by the `sync_comment_like_count` (SECURITY
+  DEFINER) trigger, mirroring `sync_post_like_count`. The optimistic +/-1 is a
+  display-only estimate reconciled on the next `load`.
+- **Notification parity.** `0008` also adds a `notify_on_comment_like` trigger
+  that notifies the liked comment's author (guarded against self-notify +
+  blocked pairs), mirroring `notify_on_like`. Because the `notifications.type`
+  check (0002) has no `comment_like` value, the row is emitted as type `like`
+  with `entity_type = 'comment'`. RLS on `comment_likes` inherits the comment's
+  post-author visibility (join `comments → posts` + `can_view_profile`),
+  mirroring `comments_select_viewable`; writes are self-scoped. Indexed by
+  `idx_comment_likes_comment`.
+
+> **ENV RISK (largest known risk).** `0008_comment_likes.sql` is **UNVERIFIED**
+> against a live Supabase project (no reachable/administerable instance, no
+> service-role key here) — **structural review only**. Live RLS enforcement,
+> the `sync_comment_like_count` count trigger, the `notify_on_comment_like`
+> producer, FK/uniqueness constraints, and index creation must be validated on
+> a real project before relying on them.
 
 ## Web-only surfaces (excluded from Android)
 
