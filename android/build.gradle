@@ -22,16 +22,21 @@ subprojects {
 // "compileSdkVersion is not specified" / "Cannot invoke method substring() on
 // null object". Force sane values onto any library subproject that is missing
 // them so those plugins configure correctly. This is the standard workaround.
+//
+// NOTE: this MUST use beforeEvaluate, not afterEvaluate. The
+// `evaluationDependsOn(":app")` above forces subprojects to be evaluated
+// eagerly, so an afterEvaluate hook here would run too late and Gradle throws
+// "Cannot run Project.afterEvaluate(Closure) when the project is already
+// evaluated". beforeEvaluate injects the values before each plugin module's
+// own build.gradle is configured.
 subprojects {
-    afterEvaluate { project ->
-        if (project.hasProperty("android")) {
+    beforeEvaluate { project ->
+        project.plugins.withId("com.android.library") {
             project.android {
                 if (namespace == null) {
                     namespace = project.group
                 }
-                if (compileSdk == null) {
-                    compileSdk = 35
-                }
+                compileSdkVersion 35
             }
         }
     }
