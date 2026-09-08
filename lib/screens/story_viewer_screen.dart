@@ -64,7 +64,13 @@ class _StoryViewerScreenState extends State<StoryViewerScreen>
       WidgetsBinding.instance.addPostFrameCallback((_) => _close());
       return;
     }
-    _startCurrent();
+    // Start the first story AFTER the first frame: `_startCurrent` calls
+    // `StoryRepository.markSeen`, which fires `notifyListeners`. Deferring to a
+    // post-frame callback keeps that notify out of the build phase (review v1,
+    // nit 3) so a listener is never notified while the tree is building.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _startCurrent();
+    });
   }
 
   @override

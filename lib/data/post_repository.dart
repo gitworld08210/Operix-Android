@@ -96,7 +96,7 @@ class PostRepository extends ChangeNotifier {
     try {
       final rows = await supabase
           .from('posts')
-          .select('*, profiles(*), post_attachments(*)')
+          .select('*, profiles(*), post_attachments(*), reactions(type)')
           .order('created_at', ascending: false)
           .order('id', ascending: false)
           .limit(kFeedPageSize);
@@ -129,7 +129,7 @@ class PostRepository extends ChangeNotifier {
       final iso = cursor.createdAt.toUtc().toIso8601String();
       final rows = await supabase
           .from('posts')
-          .select('*, profiles(*), post_attachments(*)')
+          .select('*, profiles(*), post_attachments(*), reactions(type)')
           .or(
             'created_at.lt.$iso,'
             'and(created_at.eq.$iso,id.lt.${cursor.id})',
@@ -498,15 +498,23 @@ class PostRepository extends ChangeNotifier {
     }
   }
 
-  /// Fetches the signed-in viewer's own like/repost sets so hydrated rows can
-  /// render their `liked`/`reposted` state correctly.
+  /// Fetches the signed-in viewer's own reaction/repost state so hydrated rows
+  /// can render their `myReaction`/`liked`/`reposted` flags correctly.
   ///
   /// The server owns the denormalized counters, but per-viewer toggle state is
-  /// NOT denormalized onto `posts` (it is derived from the `likes`/`reposts`
-  /// join tables). Without this, [_postFromRow] would default both flags to
-  /// `false`, so a post the viewer already liked/reposted would render as
-  /// un-toggled after a [load]. This reads only the viewer's own rows (scoped
-  /// by `user_id`), bounded to the ids present is unnecessary because RLS +
+  /// NOT denormalized onto `posts` (it is derived from the join tables).
+  /// Without this, [_postFromRow] would default all flags to `false`, so a
+  /// post the viewer already reacted to / reposted would render as un-toggled
+  /// after a [load].
+  ///
+  /// REACTION READ PATH (review v1, issue 1): the viewer's own reaction is now
+  /// read from `public.reactions` — the SOLE store the client writes since the
+  /// migrate-like-into-reactions decision (see `0007_relations.sql`). It reads
+  /// the actual reaction TYPE per post (not a forced `like`), so a `love`/
+  /// `laugh`/… reaction survives a reload with the right glyph, and a `like`
+  /// keeps the legacy `liked` compatibility view lit (like-implies-liked). The
+  /// dormant `public.likes` table is no longer consulted (it has no client
+  /// writer). This reads only the viewer's own rows (scoped by `user_id`); RLS +
   /// the `user_id` filter already limit it to the caller's own engagement.
   /// Fully guarded: returns an empty engagement set when Supabase is
   /// unavailable/unauthenticated, preserving the mock-fallback path.
@@ -514,23 +522,26 @@ class PostRepository extends ChangeNotifier {
     final userId = supabase.auth.currentUser?.id;
     if (userId == null) return const _ViewerEngagement.empty();
     try {
-      final likeRows = await supabase
-          .from('likes')
-          .select('post_id')
+      final reactionRows = await supabase
+          .from('reactions')
+          .select('post_id, type')
           .eq('user_id', userId);
       final repostRows = await supabase
           .from('reposts')
           .select('post_id')
           .eq('user_id', userId);
-      final likedIds = (likeRows as List)
-          .map((r) => (r as Map)['post_id']?.toString() ?? '')
-          .where((id) => id.isNotEmpty)
-          .toSet();
+      final reactions = <String, ReactionType>{};
+      for (final r in (reactionRows as List)) {
+        if (r is! Map) continue;
+        final postId = r['post_id']?.toString() ?? '';
+        final type = _reactionTypeFromName(r['type']);
+        if (postId.isNotEmpty && type != null) reactions[postId] = type;
+      }
       final repostedIds = (repostRows as List)
           .map((r) => (r as Map)['post_id']?.toString() ?? '')
           .where((id) => id.isNotEmpty)
           .toSet();
-      return _ViewerEngagement(liked: likedIds, reposted: repostedIds);
+      return _ViewerEngagement(reactions: reactions, reposted: repostedIds);
     } catch (_) {
       // Engagement lookup failed: fall back to no per-viewer state rather than
       // failing the whole hydration.
@@ -543,22 +554,28 @@ class PostRepository extends ChangeNotifier {
   Post _postFromRow(Map<String, dynamic> row, {_ViewerEngagement? viewer}) {
     return mapPostRow(
       row,
-      likedIds: viewer?.liked ?? const <String>{},
+      viewerReactions: viewer?.reactions ?? const <String, ReactionType>{},
       repostedIds: viewer?.reposted ?? const <String>{},
     );
   }
 
   /// Maps a `posts` row (with a joined `profiles(*)` object) to a [Post].
   ///
-  /// [likedIds]/[repostedIds] are the signed-in viewer's own like/repost post
-  /// ids; when the row's id is present in those sets the mapped post carries
-  /// the corresponding `liked`/`reposted` flag. The server-owned counts are
-  /// always taken from the row as-is. Exposed for testing so the row->model
-  /// mapping (including per-viewer hydration) is verifiable without booting
-  /// Supabase.
+  /// [viewerReactions] maps a post id to the viewer's own reaction TYPE (read
+  /// from `public.reactions` by [_viewerEngagement]); when the row's id is
+  /// present the mapped post carries that exact reaction, so a non-like
+  /// reaction survives a reload with the right glyph and a `like` keeps the
+  /// legacy `liked` view lit. [repostedIds] is the viewer's own repost set.
+  /// [likedIds]/[reactedIds] are the LEGACY like/reaction-id sets kept for
+  /// backward compatibility (a row id in either means a `like`); new callers
+  /// should prefer [viewerReactions] which carries the real type. The
+  /// server-owned counts are always taken from the row as-is. Exposed for
+  /// testing so the row->model mapping (including per-viewer hydration) is
+  /// verifiable without booting Supabase.
   @visibleForTesting
   static Post mapPostRow(
     Map<String, dynamic> row, {
+    Map<String, ReactionType> viewerReactions = const <String, ReactionType>{},
     Set<String> likedIds = const <String>{},
     Set<String> repostedIds = const <String>{},
     Set<String> reactedIds = const <String>{},
@@ -566,12 +583,16 @@ class PostRepository extends ChangeNotifier {
     final id = row['id']?.toString() ?? '';
     final attachments = _attachmentsFromRow(id, row);
     final reactionCounts = _reactionCountsFromRow(row);
-    // The viewer's own reaction: prefer an explicit joined `my_reaction`/
-    // `viewer_reaction` field on the row; otherwise fall back to the legacy
-    // like set (a row id in likedIds means a `like`). Guarded so absence yields
-    // no reaction (and, via the like-implies-liked rule, liked == false).
+    // The viewer's own reaction, resolved in precedence order:
+    //   1. an explicit joined `my_reaction`/`viewer_reaction` field on the row;
+    //   2. the viewer's actual reaction TYPE from public.reactions
+    //      (viewerReactions), so love/laugh/… survive a reload, not just like;
+    //   3. the LEGACY like/reaction id sets (a row id => a `like`).
+    // Guarded so absence yields no reaction (and, via the like-implies-liked
+    // rule, liked == false).
     final myReaction =
         _reactionTypeFromName(row['my_reaction'] ?? row['viewer_reaction']) ??
+            viewerReactions[id] ??
             (likedIds.contains(id) || reactedIds.contains(id)
                 ? ReactionType.like
                 : null);
@@ -625,7 +646,10 @@ class PostRepository extends ChangeNotifier {
       for (final entry in raw) {
         if (entry is Map) {
           final type = _reactionTypeFromName(entry['type']);
-          final n = _asInt(entry['count']);
+          // Two shapes: a pre-aggregated `{type, count}` group-by row, or a
+          // raw un-aggregated `{type}` reaction row from a plain
+          // `reactions(type)` join (each such row counts as one).
+          final n = entry.containsKey('count') ? _asInt(entry['count']) : 1;
           if (type != null && n > 0) {
             counts[type] = (counts[type] ?? 0) + n;
           }
@@ -763,21 +787,24 @@ class PostRepository extends ChangeNotifier {
   }
 }
 
-/// The signed-in viewer's own like/repost sets, keyed by post id.
+/// The signed-in viewer's own reaction/repost state, keyed by post id.
 ///
-/// Used to hydrate per-viewer `liked`/`reposted` flags onto mapped posts, which
-/// the server-owned counters on `posts` do not carry. An empty instance
-/// represents "no viewer / unauthenticated / lookup failed", in which case both
-/// flags default to `false`.
+/// Used to hydrate per-viewer `myReaction`/`liked`/`reposted` flags onto mapped
+/// posts, which the server-owned counters on `posts` do not carry. [reactions]
+/// maps a post id to the viewer's actual reaction TYPE (read from
+/// `public.reactions`), so a non-like reaction survives a reload with the right
+/// glyph and a `like` keeps the legacy `liked` view lit (like-implies-liked).
+/// An empty instance represents "no viewer / unauthenticated / lookup failed",
+/// in which case all flags default to their un-engaged value.
 class _ViewerEngagement {
-  const _ViewerEngagement({required this.liked, required this.reposted});
+  const _ViewerEngagement({required this.reactions, required this.reposted});
 
   const _ViewerEngagement.empty()
-      : liked = const <String>{},
+      : reactions = const <String, ReactionType>{},
         reposted = const <String>{};
 
-  /// Post ids the viewer has liked.
-  final Set<String> liked;
+  /// Post id -> the viewer's own reaction type on that post.
+  final Map<String, ReactionType> reactions;
 
   /// Post ids the viewer has reposted.
   final Set<String> reposted;

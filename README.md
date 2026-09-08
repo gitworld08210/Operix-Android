@@ -158,7 +158,18 @@ cheap (migration `0007_relations.sql`):
 > `like_count` has exactly one writer going forward — there is no
 > double-counting. See the head comment of `0007_relations.sql`.
 >
-> **ENV RISK (largest known risk).** `0007_relations.sql` is **UNVERIFIED**
+> **Reaction-path like notifications (migration `0009_reaction_notify.sql`).**
+> Because the client now writes likes only to `public.reactions`, the 0002
+> `notify_on_like` trigger (which fires on `public.likes`) no longer runs on the
+> going-forward path. `0009_reaction_notify.sql` adds `notify_on_reaction_like`,
+> a trigger on `public.reactions` that mirrors `notify_on_like` exactly for
+> `type='like'` (self-notify guard, `is_blocked` suppression, byte-identical
+> `type='like' + entity_type='post'` payload), so a like made via a reaction
+> notifies the post owner again. Only `like` notifies; the other five affect
+> types are a deliberate, documented later-phase concern.
+>
+> **ENV RISK (largest known risk).** `0007_relations.sql` and
+> `0009_reaction_notify.sql` are **UNVERIFIED**
 > against a live Supabase project (no reachable/administerable instance, no
 > service-role key here) — it has had **structural review only**. Live RLS
 > enforcement, the reaction-count trigger, FK/uniqueness constraints, and index

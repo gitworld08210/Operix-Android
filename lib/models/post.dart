@@ -208,10 +208,19 @@ class Post {
     double? lat,
     double? lng,
   }) {
-    // Resolve the viewer's reaction: an explicit `myReaction` wins; else a
-    // `liked` flag maps to like/none under LIKE-IMPLIES-LIKED; else carry the
-    // current reaction. `clearMyReaction` forces it to null (needed because a
-    // null `myReaction` arg is indistinguishable from "unchanged").
+    // Resolve the viewer's reaction, in precedence order:
+    //   1. `clearMyReaction: true` forces it to null (needed because a null
+    //      `myReaction` arg is indistinguishable from "unchanged");
+    //   2. an explicit `myReaction` wins — this is how a caller sets a NON-LIKE
+    //      reaction (love/laugh/…), which reads `liked == false` on its own, so
+    //      no separate `liked: false` is required to "lower" liked;
+    //   3. else a `liked` flag maps to like/none under LIKE-IMPLIES-LIKED
+    //      (`liked: false` clears any reaction; `liked: true` sets `like`);
+    //   4. else carry the current reaction unchanged.
+    // NOTE: to switch to a non-like reaction, pass that reaction via
+    // `myReaction:` (step 2) — passing `liked: false` alone clears the reaction
+    // entirely (step 3). The two are deliberately separate so `clearReaction`
+    // (clearMyReaction) and `react` (myReaction) each express intent exactly.
     final ReactionType? resolvedReaction = clearMyReaction
         ? null
         : myReaction ??

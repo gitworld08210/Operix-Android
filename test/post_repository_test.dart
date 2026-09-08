@@ -451,6 +451,83 @@ void main() {
       expect(post.liked, isTrue);
     });
 
+    test('hydrates the viewer reaction TYPE from viewerReactions (reactions '
+        'table read path)', () {
+      // Review v1, issue 1: the viewer's own reaction is now read from
+      // public.reactions and carries the real type, so a non-like reaction
+      // survives a reload (not forced to `like`).
+      final post = PostRepository.mapPostRow(
+        _row('p1'),
+        viewerReactions: <String, ReactionType>{'p1': ReactionType.love},
+      );
+      expect(post.myReaction, ReactionType.love);
+      expect(post.liked, isFalse);
+    });
+
+    test('a viewer LIKE from viewerReactions lights the legacy liked view', () {
+      final post = PostRepository.mapPostRow(
+        _row('p1'),
+        viewerReactions: <String, ReactionType>{'p1': ReactionType.like},
+      );
+      expect(post.myReaction, ReactionType.like);
+      expect(post.liked, isTrue);
+    });
+
+    test('does not hydrate a reaction for a post absent from viewerReactions',
+        () {
+      final post = PostRepository.mapPostRow(
+        _row('p2'),
+        viewerReactions: <String, ReactionType>{'p1': ReactionType.love},
+      );
+      expect(post.myReaction, isNull);
+      expect(post.liked, isFalse);
+    });
+
+    test('populates reactionCounts from a plain reactions(type) join', () {
+      // The load()/loadMore() select now joins `reactions(type)` (un-aggregated
+      // rows); each row counts as one so reactionCounts still hydrates.
+      final row = _row('p1')
+        ..['reactions'] = <Map<String, dynamic>>[
+          <String, dynamic>{'type': 'like'},
+          <String, dynamic>{'type': 'like'},
+          <String, dynamic>{'type': 'love'},
+        ];
+      final post = PostRepository.mapPostRow(row);
+      expect(post.reactionCounts[ReactionType.like], 2);
+      expect(post.reactionCounts[ReactionType.love], 1);
+    });
+
+    test('a like made this session round-trips through a server reload '
+        '(issue 1)', () {
+      // Review v1, issue 1 (BLOCKING): a like/reaction is persisted to
+      // public.reactions, so a later server-backed reload reads it back from
+      // reactions (via viewerReactions) and re-hydrates myReaction. Before the
+      // fix, load() read the dormant likes table and the like rendered as
+      // un-liked after reload. Simulate the full round-trip:
+      //   1. viewer reacts (love) in-session;
+      final post = firstPost();
+      repo.clearReaction(post.id); // normalize to a known baseline
+      final reacted = repo.react(post.id, ReactionType.love);
+      expect(reacted!.myReaction, ReactionType.love);
+      //   2. a server reload maps the fresh row; the reactions read returns the
+      //      viewer's own reaction TYPE for that post;
+      final reloaded = PostRepository.mapPostRow(
+        _row(post.id),
+        viewerReactions: <String, ReactionType>{post.id: ReactionType.love},
+      );
+      //   3. the reaction survives the reload with the correct (non-like) type.
+      expect(reloaded.myReaction, ReactionType.love);
+      expect(reloaded.liked, isFalse);
+
+      // And a plain like round-trips as a lit `liked` view.
+      final likedReload = PostRepository.mapPostRow(
+        _row(post.id),
+        viewerReactions: <String, ReactionType>{post.id: ReactionType.like},
+      );
+      expect(likedReload.liked, isTrue);
+      expect(likedReload.myReaction, ReactionType.like);
+    });
+
     test('maps optional location/lat/lng from the row', () {
       final row = _row('p1')
         ..['location'] = 'Lisbon'
@@ -460,6 +537,48 @@ void main() {
       expect(post.location, 'Lisbon');
       expect(post.lat, 38.72);
       expect(post.lng, -9.13);
+    });
+  });
+
+  group('Post.copyWith reaction resolution (review v1, nit 2)', () {
+    Post base() => Post(
+          id: 'c1',
+          author: MockData.currentUser,
+          content: 'x',
+          createdAt: DateTime(2024),
+        );
+
+    test('clearMyReaction lowers a non-like reaction to null (liked stays '
+        'false)', () {
+      final reacted = base().copyWith(myReaction: ReactionType.love);
+      expect(reacted.myReaction, ReactionType.love);
+      expect(reacted.liked, isFalse);
+      final cleared = reacted.copyWith(clearMyReaction: true);
+      expect(cleared.myReaction, isNull);
+      expect(cleared.liked, isFalse);
+    });
+
+    test('setting a non-like reaction reads liked=false without a liked arg',
+        () {
+      final liked = base().copyWith(liked: true);
+      expect(liked.liked, isTrue);
+      // Switching to a non-like reaction lowers liked to false on its own.
+      final switched = liked.copyWith(myReaction: ReactionType.laugh);
+      expect(switched.myReaction, ReactionType.laugh);
+      expect(switched.liked, isFalse);
+    });
+
+    test('liked:false clears any reaction under like-implies-liked', () {
+      final liked = base().copyWith(myReaction: ReactionType.love);
+      final lowered = liked.copyWith(liked: false);
+      expect(lowered.myReaction, isNull);
+      expect(lowered.liked, isFalse);
+    });
+
+    test('a bare copyWith carries the existing reaction unchanged', () {
+      final reacted = base().copyWith(myReaction: ReactionType.wow);
+      final unchanged = reacted.copyWith(content: 'y');
+      expect(unchanged.myReaction, ReactionType.wow);
     });
   });
 
