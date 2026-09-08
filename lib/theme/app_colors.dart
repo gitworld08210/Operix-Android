@@ -33,6 +33,16 @@ abstract final class AppColors {
   /// Repost / green.
   static const Color repost = Color(0xFF00BA7C);
 
+  /// Subscribe / premium magenta. Used for X's "Subscribe" button and other
+  /// premium/creator upsell accents. Distinct from [like] to avoid confusing
+  /// engagement pink with the commerce/subscribe magenta.
+  static const Color subscribe = Color(0xFFC9379D);
+
+  /// Premium badge blue tint. A softer blue used for premium/verified badge
+  /// backgrounds and promo tints so it reads as a subtle wash rather than the
+  /// full-strength [accent].
+  static const Color premiumBlue = Color(0xFF1DA1F2);
+
   /// Pure white helper.
   static const Color white = Color(0xFFFFFFFF);
 
