@@ -77,6 +77,44 @@ rewriting every consumer:
 > bucket (populating the attachment URLs from device bytes) is Phase 4; the seam
 > is marked in code with `// PHASE 4 SEAM: ...`.
 
+## Stories (24h ephemeral)
+
+Instagram-style **stories** live at the top of the home feed:
+
+- **Story ring** (`StoryRing`) — a horizontally-scrollable row of author tiles
+  above the For You / Following tabs. A **gradient ring** marks a group with
+  **unseen** stories, a **muted/gray ring** marks an all-seen group, and the
+  current user's **own tile leads** with a `+` add affordance. It rebuilds via
+  an `AnimatedBuilder` over `StoryRepository.instance` and is placed above the
+  `TabBarView` so it never interferes with the feeds' infinite-scroll lists.
+- **Full-screen viewer** (`StoryViewerScreen`) — a tap-through viewer with
+  **segmented progress bars** (Instagram-style): tap right to advance, tap left
+  to go back, with per-story auto-advance driven by a single
+  `AnimationController` (disposed on close). Showing a story marks it **seen**.
+- **Model + repository:** an immutable `Story` (`id`, `author`, `mediaUrl`,
+  `type`, `createdAt`, `expiresAt`, `seen`) with `isActive(now)` and a
+  `Story.ephemeral(ttl: 24h)` factory; `StoryRepository` is a `ChangeNotifier`
+  singleton over a `MockData` seed exposing `activeStoryGroups` (grouped by
+  author, **own group first**, expired stories filtered out), `activeStoriesFor`,
+  and an idempotent single-notify `markSeen`, plus guarded fire-and-forget
+  `load()` / persistence — the same offline-no-op pattern as the other repos.
+- **Backend:** migration `0006_stories.sql` adds `public.stories` (with an
+  `expires_at` expiry column) and a `public.story_views` seen-tracking table.
+  Story SELECT RLS is **author-inherited AND not-expired**
+  (`expires_at > now() and public.can_view_profile(auth.uid(), owner)`),
+  mirroring the comments/reposts visibility pattern; writes are owner-scoped.
+
+> **Media by reference (Phase 4 seam).** Like posts, stories carry media **by
+> URL/reference** only — real device capture/upload lands in Phase 4 (marked in
+> code with `// PHASE 4 SEAM: ...`).
+>
+> **Server-expiry unverified (ENV RISK).** Ephemerality is **client-filtered**
+> via `Story.isActive(now)`; the migration adds the matching server RLS time
+> predicate, but it has **not** been applied/exercised against a live Supabase
+> project here (structural review only). True enforcement needs that server RLS
+> plus a **scheduled sweep** of expired rows (a later ops concern). Treat live
+> expiry/RLS behavior as the largest known risk for this feature.
+
 ## Web-only surfaces (excluded from Android)
 
 **Ads Manager** and **Admin-OS** are **web-only** and are intentionally **not** part of this Android Flutter app. They remain in the React/Vite web project only.
