@@ -12,7 +12,7 @@ The app is feature-complete for a first pass across three increments:
 
 - **FEAT-001 (foundation):** standard Flutter project files, a complete `android/` Gradle scaffold (namespace / applicationId `com.oneleven.app`, label "Oneleven"), the centralized theme (`lib/theme/`), the data models (`lib/models/`), and in-memory mock repositories with sample data (`lib/data/`).
 - **FEAT-002 (UI):** `lib/main.dart`, reusable widgets (`lib/widgets/`), and all screens (`lib/screens/`) wired to the repositories, plus the Supabase email-OTP auth screen (`lib/screens/auth_screen.dart`) and auth gate.
-- **FEAT-003 (Supabase backend):** `lib/supabase_config.dart`, `lib/data/auth_repository.dart`, `lib/data/storage_service.dart`, the `supabase/migrations/0001_init.sql` schema, and Supabase-backed `PostRepository` / `ProfileRepository` (with a `MockData` fallback). See **Backend (Supabase)** below.
+- **FEAT-003 (Supabase backend):** `lib/supabase_config.dart`, `lib/data/auth_repository.dart`, `lib/data/storage_service.dart`, the `supabase/migrations/` schema, and the fully Supabase-backed repositories (`PostRepository`, `ProfileRepository`, `NotificationRepository`, `MessageRepository`) with explicit load-state and no mock fallback. See **Backend (Supabase)** below.
 
 ## Folder structure
 
@@ -23,7 +23,7 @@ oneleven_app/
     main.dart                  # App entry; MaterialApp + dark theme + home shell
     theme/                     # app_colors, app_text_styles, app_theme (+ spacing/radii)
     models/                    # post, user_profile, notification_item, conversation
-    data/                      # mock_data, post/profile/auth repositories (ChangeNotifier singletons), storage_service
+    data/                      # post/profile/notification/message/auth repositories (ChangeNotifier singletons), load_status, storage_service
     supabase_config.dart       # Supabase URL/anon-key + initSupabase()
     utils/                     # format.dart (fmtCount, timeAgo)
     widgets/                   # avatar, verified_badge, action_button, post_card, app_scaffold
@@ -164,39 +164,55 @@ The client verifies with `verifyOTP(type: OtpType.email, ...)`, which expects
 the numeric token from `{{ .Token }}`. Magic-link click-through is **not** the
 flow used here.
 
-### Live vs. mock
+### Data layer (fully Supabase-backed)
 
-**Live against Supabase (when reachable + signed in):**
+As of the data-layer rebuild there is **no `MockData` fallback**. Every
+repository is a `ChangeNotifier` singleton that starts empty in a
+`LoadStatus.idle` state (see `lib/data/load_status.dart`), loads from Supabase
+via `load()` after sign-in, and exposes a real `loading` / `loaded` / `error`
+status plus an empty-state (a `loaded` status with an empty cache is a genuine
+"no data yet", not an error). `main.dart`'s `AuthGate` calls `load()` on every
+repository after sign-in and `clear()` on sign-out, so a fresh login never
+shows a previous user's cache.
 
-- Auth (email OTP sign-up / login / sign-out).
-- `profiles` — `ProfileRepository.currentUser` / `profiles` hydrate from the
-  `profiles` table; `updateProfile` persists `display_name` / `bio`.
-- `posts` — `PostRepository` hydrates from `posts` (joining `profiles` for the
-  author); composing a post inserts into `posts` with a **client-generated
-  UUID** (see `lib/utils/ids.dart`) sent as the row `id`, so the in-memory post
-  id and the DB row id are identical (a later like/repost on the just-composed
-  post targets the correct row instead of a not-yet-existing one).
-- `likes` — like toggles perform a fire-and-forget insert/delete on the
-  `likes` join table only. **`posts.like_count` is owned by the database:** an
-  `after insert or delete` trigger (`sync_post_like_count`) recomputes it from
-  `count(*)`, so concurrent clients cannot drift the count. The client never
-  writes `like_count` directly.
-- `reels` — the reel-compose flow uploads the video to the `reels` bucket and
-  inserts a first-class row into the **`reels` table** (`owner`, `video_url`,
-  `caption`) via `StorageService.insertReel`, then also surfaces the reel in
-  the timeline as a video post. Wiring a gallery/camera picker (the raw byte
-  source) is the only remaining step; the upload + DB write are real.
-- Storage — `StorageService.uploadAvatar` (bucket `avatars`) and
-  `StorageService.uploadReel` (bucket `reels`) via `uploadBinary` +
-  `getPublicUrl`.
-
-> **`repost_count`:** as of `0002_backend.sql` there is now a first-class
-> `reposts` join table with an `after insert or delete` trigger
-> (`sync_post_repost_count`) that recomputes `repost_count` from `count(*)`,
-> mirroring `sync_post_like_count`. The count is therefore database-owned and
-> no longer drifts under concurrent clients. (The client code in
-> `post_repository.dart` may still be migrated to toggle the `reposts` table
-> instead of writing `repost_count` directly — the schema now supports it.)
+- **Auth** — email OTP sign-up / login / sign-out.
+- **`profiles`** (`ProfileRepository`) — `currentUser` / `profiles` load from
+  the `profiles` table; `updateProfile` persists `display_name` / `bio`
+  (optimistic, reverts on failure). Real follow/unfollow via `toggleFollow`
+  (insert/delete in `follows`, never writing the DB-owned follower/following
+  counters), plus `isFollowing`, `followingIds`, `profileById`,
+  `profileByUsername`.
+- **`posts`** (`PostRepository`) — the main feed loads **top-level posts only**
+  (`parent_id is null`) joining `profiles` for the author, then hydrates the
+  current user's `liked` / `reposted` / `bookmarked` flags. `following()`
+  filters to authors the user actually follows (from the `follows` table).
+  Composing a post inserts into `posts` with a **client-generated UUID**
+  (`lib/utils/ids.dart`) so the in-memory id equals the DB row id.
+- **`likes` / `reposts` / `bookmarks`** — `toggleLike` / `toggleRepost` /
+  `toggleBookmark` are optimistic then insert/delete rows in the corresponding
+  join table, reverting the optimistic change and surfacing `lastError` on
+  failure. **The DB owns `like_count` / `repost_count` / `reply_count`**
+  (recompute-from-`count(*)` triggers); the client never writes those columns.
+- **Replies** — `replies(parentId)` loads child posts; `addReply` inserts a
+  `posts` row with `parent_id` set. The parent's `reply_count` is
+  trigger-maintained.
+- **Notifications** (`NotificationRepository`) — loads the current user's
+  `notifications` (joined to the actor profile), exposes `unreadNotifications`
+  and `markNotificationsRead`, and `createNotification(...)` is fired as a side
+  effect of like/reply/repost/follow (self-notifications are skipped per the
+  `actor <> recipient` RLS rule).
+- **Direct messages** (`MessageRepository`) — loads the conversations the user
+  participates in (with the other participant's profile and per-user unread),
+  `loadMessages`, `sendMessage`, `openOrCreateConversationWith`, and
+  `resetUnread`. `Message.fromMe` is derived by comparing `messages.sender` to
+  the current auth uid. `last_preview` / `updated_at` / `unread` are
+  trigger-maintained.
+- **`reels`** — the reel-compose flow uploads the video to the `reels` bucket
+  and inserts a first-class row into the **`reels` table** via
+  `StorageService.insertReel`, then surfaces the reel as a video post. Wiring a
+  gallery/camera picker (the raw byte source) is the only remaining step.
+- **Storage** — `StorageService.uploadAvatar` (bucket `avatars`) and
+  `StorageService.uploadReel` (bucket `reels`).
 
 ### Backend schema extension — `0002_backend.sql` / `0003_harden_functions.sql`
 
@@ -224,21 +240,41 @@ All tables have RLS enabled. The migrations have been applied to the hosted
 Oneleven project and verified end-to-end (new-user, like/reply/repost/follow
 counters, and message unread all confirmed via a smoke test).
 
-**Still mock in the app (`lib/data/mock_data.dart`) — schema now exists, client wiring pending:**
+### Data-layer extension — `0004`–`0006`
 
-- Notifications (`ProfileRepository.notifications()` / `unreadNotifications` /
-  `markNotificationsRead`) — the `notifications` table now exists; the
-  repository can be pointed at it.
-- Conversations / direct messages (`conversations()` / `unreadMessages` /
-  `conversationById`) — the `conversations` / `conversation_participants` /
-  `messages` tables now exist; the repository can be pointed at them.
+`0004_search_realtime_indexes.sql` adds the search + realtime plumbing the
+Supabase-backed data layer needs: a `pg_trgm` extension (in the `extensions`
+schema) with GIN trigram indexes on `profiles.username` / `profiles.display_name`
+/ `posts.content`; two `SECURITY INVOKER` search RPCs (`search_profiles`,
+`search_posts`, both with a fixed `search_path` and granted to `authenticated`
+only); FK-covering indexes on `likes` / `reposts` / `bookmarks` (`post_id`),
+`follows` (`followee`), `messages` (`sender`), and `notifications`
+(`actor` / `post_id`); and membership of `posts`, `messages`, `notifications`,
+`conversations`, and `conversation_participants` in the `supabase_realtime`
+publication.
 
-**Graceful fallback:** the repositories seed their in-memory caches from
-`MockData` at construction and hydrate from Supabase asynchronously
-(fire-and-forget, guarded). If Supabase is uninitialized, unreachable, or the
-user is signed out, the queries are caught and the app keeps showing mock data
-instead of failing. This same fallback is what lets the unit tests
-(which never boot Supabase) run against `PostRepository()` / `ProfileRepository()`.
+`0005_optimize_rls_initplan.sql` addresses the performance advisor: it wraps
+`auth.uid()` in `(select auth.uid())` across every RLS policy (so it is
+evaluated once per statement rather than once per row) and adds a covering
+index on `reels.owner`.
+
+`0006_profile_embed_fkeys.sql` adds foreign keys from `posts.owner`,
+`notifications.actor`, `conversation_participants.user_id`, and
+`messages.sender` to `public.profiles(id)` (alongside the existing
+`auth.users(id)` FKs) so PostgREST can embed the author/actor/participant
+profile (`select('*, profiles(*)')`).
+
+After each DDL change the security and performance advisors were re-run. The
+remaining findings are pre-existing and justified: the `is_conversation_participant`
+and Supabase-managed `rls_auto_enable` `SECURITY DEFINER` warnings (the former
+must stay `EXECUTE`-able by `authenticated` because it is used inside RLS
+policies), and `unused_index` INFO notices (expected while the tables are still
+empty; the indexes back queries the app issues at runtime).
+
+**Unit tests** exercise the offline-safe surface of the repositories (initial
+`idle` / empty state, unknown-id toggles returning null, and `clear()`); the
+Supabase-dependent paths are verified manually / via the MCP tooling because
+the tests never boot a Supabase client.
 
 ### Media upload note
 

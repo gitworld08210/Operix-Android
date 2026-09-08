@@ -1,6 +1,12 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:oneleven/data/load_status.dart';
 import 'package:oneleven/data/profile_repository.dart';
 
+/// These tests exercise the parts of [ProfileRepository] that do NOT require a
+/// booted Supabase client. The repository is now fully Supabase-backed with no
+/// mock fallback: a fresh instance starts with no current user, an empty
+/// profile list, and [LoadStatus.idle]. Follow/updateProfile/load require a
+/// live client and are covered by manual/integration verification.
 void main() {
   late ProfileRepository repo;
 
@@ -8,75 +14,33 @@ void main() {
     repo = ProfileRepository();
   });
 
-  group('notifications', () {
-    test('are returned newest-first', () {
-      final list = repo.notifications();
-      expect(list, isNotEmpty);
-      for (var i = 0; i < list.length - 1; i++) {
-        expect(
-          list[i].createdAt.isAfter(list[i + 1].createdAt) ||
-              list[i].createdAt.isAtSameMomentAs(list[i + 1].createdAt),
-          isTrue,
-        );
-      }
+  group('initial state', () {
+    test('starts idle with no current user and no profiles', () {
+      expect(repo.status, LoadStatus.idle);
+      expect(repo.currentUser, isNull);
+      expect(repo.profiles, isEmpty);
+      expect(repo.followingIds, isEmpty);
+      expect(repo.error, isNull);
     });
 
-    test('unreadNotifications counts only unread entries', () {
-      final unread = repo.notifications().where((n) => !n.read).length;
-      expect(repo.unreadNotifications, unread);
-      expect(repo.unreadNotifications, greaterThan(0));
+    test('isFollowing is false for any id before loading', () {
+      expect(repo.isFollowing('anyone'), isFalse);
     });
 
-    test('markNotificationsRead clears the unread count and notifies', () {
-      var notified = 0;
-      repo.addListener(() => notified++);
-
-      expect(repo.unreadNotifications, greaterThan(0));
-      repo.markNotificationsRead();
-
-      expect(repo.unreadNotifications, 0);
-      expect(notified, 1);
-      for (final n in repo.notifications()) {
-        expect(n.read, isTrue);
-      }
+    test('profiles returns an unmodifiable view', () {
+      final list = repo.profiles;
+      expect(() => list.clear(), throwsUnsupportedError);
     });
   });
 
-  group('conversations', () {
-    test('are returned most-recently-updated first', () {
-      final list = repo.conversations();
-      expect(list, isNotEmpty);
-      for (var i = 0; i < list.length - 1; i++) {
-        expect(
-          list[i].updatedAt.isAfter(list[i + 1].updatedAt) ||
-              list[i].updatedAt.isAtSameMomentAs(list[i + 1].updatedAt),
-          isTrue,
-        );
-      }
-    });
-
-    test('unreadMessages sums unread across conversations', () {
-      final expected =
-          repo.conversations().fold<int>(0, (sum, c) => sum + c.unread);
-      expect(repo.unreadMessages, expected);
-    });
-
-    test('conversationById returns a match or null', () {
-      final first = repo.conversations().first;
-      expect(repo.conversationById(first.id), isNotNull);
-      expect(repo.conversationById('missing-id'), isNull);
-    });
-  });
-
-  group('updateProfile', () {
-    test('updates editable fields and notifies', () {
+  group('clear', () {
+    test('resets to the idle empty state and notifies', () {
       var notified = 0;
       repo.addListener(() => notified++);
-
-      repo.updateProfile(displayName: 'New Name', bio: 'New bio');
-
-      expect(repo.currentUser.displayName, 'New Name');
-      expect(repo.currentUser.bio, 'New bio');
+      repo.clear();
+      expect(repo.status, LoadStatus.idle);
+      expect(repo.currentUser, isNull);
+      expect(repo.profiles, isEmpty);
       expect(notified, 1);
     });
   });

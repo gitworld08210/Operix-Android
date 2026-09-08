@@ -3,6 +3,10 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import 'data/message_repository.dart';
+import 'data/notification_repository.dart';
+import 'data/post_repository.dart';
+import 'data/profile_repository.dart';
 import 'screens/auth_screen.dart';
 import 'supabase_config.dart';
 import 'theme/app_text_styles.dart';
@@ -54,10 +58,43 @@ class _AuthGateState extends State<AuthGate> {
   void initState() {
     super.initState();
     _session = supabase.auth.currentSession;
+    if (_session != null) {
+      _loadRepositories();
+    }
     _authSub = supabase.auth.onAuthStateChange.listen((data) {
       if (!mounted) return;
+      final hadSession = _session != null;
+      final hasSession = data.session != null;
       setState(() => _session = data.session);
+      if (hasSession && !hadSession) {
+        // Fresh sign-in: load each user-scoped repository.
+        _loadRepositories();
+      } else if (!hasSession && hadSession) {
+        // Sign-out: clear cached state so the next login starts clean.
+        _clearRepositories();
+      }
     });
+  }
+
+  /// Loads all user-scoped repositories after sign-in. Each [load] is guarded
+  /// internally and sets its own load-state, so this is safe to fire.
+  void _loadRepositories() {
+    // ignore: discarded_futures
+    ProfileRepository.instance.load();
+    // ignore: discarded_futures
+    PostRepository.instance.load();
+    // ignore: discarded_futures
+    NotificationRepository.instance.load();
+    // ignore: discarded_futures
+    MessageRepository.instance.load();
+  }
+
+  /// Clears all user-scoped repositories on sign-out.
+  void _clearRepositories() {
+    ProfileRepository.instance.clear();
+    PostRepository.instance.clear();
+    NotificationRepository.instance.clear();
+    MessageRepository.instance.clear();
   }
 
   @override

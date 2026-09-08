@@ -45,6 +45,7 @@ class _ComposeScreenState extends State<ComposeScreen> {
   void _post() {
     if (!_canPost) return;
     final user = ProfileRepository.instance.currentUser;
+    if (user == null) return; // must be signed in and loaded
     final post = Post(
       // A client-generated UUID so the in-memory id equals the persisted DB
       // row id (the posts.id uuid column accepts it). See utils/ids.dart.
@@ -53,8 +54,9 @@ class _ComposeScreenState extends State<ComposeScreen> {
       content: _controller.text.trim(),
       createdAt: DateTime.now(),
     );
-    // addPost updates the in-memory feed immediately and persists the post to
-    // the Supabase `posts` table in the background (fire-and-forget).
+    // addPost inserts into the Supabase `posts` table and updates the
+    // in-memory feed; it is awaited internally and reverts on failure.
+    // ignore: discarded_futures
     PostRepository.instance.addPost(post);
     Navigator.of(context).pop();
   }
@@ -96,14 +98,17 @@ class _ComposeScreenState extends State<ComposeScreen> {
     // Also surface the reel in the main timeline as a video post so it is
     // immediately visible. (A dedicated reels feed reading from the `reels`
     // table is a future step.)
+    final author = ProfileRepository.instance.currentUser;
+    if (author == null) return;
     final reelPost = Post(
       id: newUuidV4(),
-      author: ProfileRepository.instance.currentUser,
+      author: author,
       content: caption,
       mediaUrl: videoUrl,
       mediaType: MediaType.video,
       createdAt: DateTime.now(),
     );
+    // ignore: discarded_futures
     PostRepository.instance.addPost(reelPost);
   }
 
@@ -116,6 +121,8 @@ class _ComposeScreenState extends State<ComposeScreen> {
   @override
   Widget build(BuildContext context) {
     final user = ProfileRepository.instance.currentUser;
+    final avatarUrl = user?.avatarUrl;
+    final displayName = user?.displayName ?? 'You';
     return Scaffold(
       appBar: AppBar(
         leading: TextButton(
@@ -152,8 +159,8 @@ class _ComposeScreenState extends State<ComposeScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: <Widget>[
                     Avatar(
-                      url: user.avatarUrl,
-                      displayName: user.displayName,
+                      url: avatarUrl,
+                      displayName: displayName,
                       size: 44,
                     ),
                     const SizedBox(width: AppSpacing.md),

@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import '../data/profile_repository.dart';
+import '../data/message_repository.dart';
 import '../models/conversation.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
@@ -10,7 +10,7 @@ import '../widgets/avatar.dart';
 import '../widgets/verified_badge.dart';
 import 'conversation_screen.dart';
 
-/// Direct-message thread list backed by [ProfileRepository.instance].
+/// Direct-message thread list backed by [MessageRepository.instance].
 class MessagesScreen extends StatefulWidget {
   const MessagesScreen({super.key});
 
@@ -24,9 +24,9 @@ class _MessagesScreenState extends State<MessagesScreen> {
     return Scaffold(
       appBar: AppBar(title: const Text('Messages')),
       body: AnimatedBuilder(
-        animation: ProfileRepository.instance,
+        animation: MessageRepository.instance,
         builder: (context, _) {
-          final conversations = ProfileRepository.instance.conversations();
+          final conversations = MessageRepository.instance.conversations();
           if (conversations.isEmpty) {
             return Center(
               child: Text('No messages yet', style: AppTextStyles.handle),

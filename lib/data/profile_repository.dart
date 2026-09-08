@@ -1,144 +1,226 @@
 import 'package:flutter/foundation.dart';
 
-import '../models/conversation.dart';
 import '../models/notification_item.dart';
 import '../models/user_profile.dart';
 import '../supabase_config.dart';
-import 'mock_data.dart';
+import 'load_status.dart';
+import 'notification_repository.dart';
 
-/// Store for the current user, the known profiles, notifications, and
-/// conversations.
+/// Store for the current user and the profiles known to the app, fully backed
+/// by the Supabase `profiles` table (no mock fallback).
 ///
-/// `currentUser` and `profiles` are backed by Supabase (the `profiles` table)
-/// with a graceful [MockData] fallback: they are seeded from mock data at
-/// construction and hydrated asynchronously via [load] (fire-and-forget from
-/// the constructor). [load] is fully guarded so it is a no-op when Supabase is
-/// unavailable (e.g. under `flutter test` or offline) and only notifies when it
-/// actually replaces the seed with live rows.
+/// A [ChangeNotifier] singleton (`ProfileRepository.instance`). [currentUser]
+/// is null until [load] resolves it after sign-in; [status] exposes the real
+/// loading/loaded/error state. Notifications and direct messages now live in
+/// their own repositories ([NotificationRepository], [MessageRepository]).
 ///
-/// `notifications()` and `conversations()` remain **mock-only** for now (there
-/// are no notification/message tables in the initial schema); this is
-/// documented in the README's live-vs-mock section.
+/// Follows are real: [toggleFollow] inserts/deletes rows in the `follows`
+/// table and never writes the DB-owned `followers` / `following` counters.
 class ProfileRepository extends ChangeNotifier {
-  ProfileRepository()
-      : _currentUser = MockData.currentUser,
-        _profiles = List<UserProfile>.of(MockData.profiles),
-        _notifications = MockData.notifications(),
-        _conversations = MockData.conversations() {
-    // Hydrate current user + profiles from Supabase in the background.
-    // Guarded so it is a no-op (and does not notify) when Supabase is
-    // unavailable, leaving the mock seed intact for tests and offline UI.
-    // ignore: discarded_futures
-    load();
-  }
+  ProfileRepository();
 
   /// Shared singleton for the app.
   static final ProfileRepository instance = ProfileRepository();
 
-  UserProfile _currentUser;
-  List<UserProfile> _profiles;
-  final List<NotificationItem> _notifications;
-  final List<Conversation> _conversations;
+  UserProfile? _currentUser;
+  final List<UserProfile> _profiles = <UserProfile>[];
+  final Set<String> _followingIds = <String>{};
+  LoadStatus _status = LoadStatus.idle;
+  Object? _error;
 
-  /// The signed-in user.
-  UserProfile get currentUser => _currentUser;
+  /// The signed-in user, or null before [load] resolves it / after sign-out.
+  UserProfile? get currentUser => _currentUser;
+
+  /// The current load state of [profiles] / [currentUser].
+  LoadStatus get status => _status;
+
+  /// The most recent load error, if [status] is [LoadStatus.error].
+  Object? get error => _error;
 
   /// All profiles known to the app (for search / suggestions).
   List<UserProfile> get profiles => List<UserProfile>.unmodifiable(_profiles);
 
-  /// Hydrates [_currentUser] and [_profiles] from the Supabase `profiles`
-  /// table. Fire-and-forget; fully guarded so it never throws (e.g. when
-  /// Supabase is uninitialized under tests) and only notifies on live rows.
+  /// The set of user ids the current user follows.
+  Set<String> get followingIds => Set<String>.unmodifiable(_followingIds);
+
+  /// Loads all profiles, resolves [currentUser] from the signed-in id, and
+  /// hydrates the follow set. Sets [status] and notifies in every outcome.
+  /// Never throws into the UI.
   Future<void> load() async {
+    _status = LoadStatus.loading;
+    _error = null;
+    notifyListeners();
     try {
       final rows = await supabase.from('profiles').select();
       final data = (rows as List).cast<Map<String, dynamic>>();
-      if (data.isEmpty) return; // keep the mock seed as a graceful fallback
-      final mapped = data.map(_profileFromRow).toList();
+      _profiles
+        ..clear()
+        ..addAll(data.map(_profileFromRow));
+
       final myId = supabase.auth.currentUser?.id;
-      _profiles = mapped;
+      _currentUser = null;
       if (myId != null) {
-        for (final p in mapped) {
+        for (final p in _profiles) {
           if (p.id == myId) {
             _currentUser = p;
             break;
           }
         }
       }
+
+      await loadFollowing();
+
+      _status = LoadStatus.loaded;
       notifyListeners();
-    } catch (_) {
-      // Supabase unavailable/unauthenticated or query failed: keep the mock
-      // seed. Never throw into construction or the UI.
+    } catch (e) {
+      _error = e;
+      _status = LoadStatus.error;
+      notifyListeners();
     }
   }
 
-  /// Activity notifications, newest first. (Still mock-backed.)
-  List<NotificationItem> notifications() {
-    final list = List<NotificationItem>.of(_notifications);
-    list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
-    return List<NotificationItem>.unmodifiable(list);
-  }
-
-  /// Number of unread notifications.
-  int get unreadNotifications => _notifications.where((n) => !n.read).length;
-
-  /// Direct-message threads, most recently updated first. (Still mock-backed.)
-  List<Conversation> conversations() {
-    final list = List<Conversation>.of(_conversations);
-    list.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
-    return List<Conversation>.unmodifiable(list);
-  }
-
-  /// Total unread messages across all conversations.
-  int get unreadMessages =>
-      _conversations.fold<int>(0, (sum, c) => sum + c.unread);
-
-  /// Finds a conversation by id.
-  Conversation? conversationById(String id) {
-    for (final c in _conversations) {
-      if (c.id == id) return c;
-    }
-    return null;
-  }
-
-  /// Marks all notifications as read.
-  void markNotificationsRead() {
-    for (var i = 0; i < _notifications.length; i++) {
-      if (!_notifications[i].read) {
-        _notifications[i] = _notifications[i].copyWith(read: true);
+  /// Loads (into [followingIds]) the set of user ids the current user follows.
+  Future<void> loadFollowing() async {
+    try {
+      final myId = supabase.auth.currentUser?.id;
+      if (myId == null) {
+        _followingIds.clear();
+        return;
       }
+      final rows = await supabase
+          .from('follows')
+          .select('followee')
+          .eq('follower', myId);
+      final data = (rows as List).cast<Map<String, dynamic>>();
+      _followingIds
+        ..clear()
+        ..addAll(
+          data
+              .map((r) => r['followee']?.toString() ?? '')
+              .where((id) => id.isNotEmpty),
+        );
+    } catch (_) {
+      // Keep the current set.
+    }
+  }
+
+  /// Whether the current user follows [id].
+  bool isFollowing(String id) => _followingIds.contains(id);
+
+  /// Follows or unfollows [targetUserId] by inserting/deleting a `follows`
+  /// row (never writing the DB-owned follower/following counters). Optimistic;
+  /// reverts on failure. Creates a follow notification for the target on a new
+  /// follow.
+  Future<void> toggleFollow(String targetUserId) async {
+    final myId = supabase.auth.currentUser?.id;
+    if (myId == null || targetUserId == myId) return;
+
+    final wasFollowing = _followingIds.contains(targetUserId);
+    if (wasFollowing) {
+      _followingIds.remove(targetUserId);
+    } else {
+      _followingIds.add(targetUserId);
     }
     notifyListeners();
+
+    try {
+      if (wasFollowing) {
+        await supabase
+            .from('follows')
+            .delete()
+            .eq('follower', myId)
+            .eq('followee', targetUserId);
+      } else {
+        await supabase.from('follows').insert(<String, dynamic>{
+          'follower': myId,
+          'followee': targetUserId,
+        });
+        await NotificationRepository.instance.createNotification(
+          recipient: targetUserId,
+          type: NotificationType.follow,
+        );
+      }
+    } catch (_) {
+      // Revert the optimistic change on failure.
+      if (wasFollowing) {
+        _followingIds.add(targetUserId);
+      } else {
+        _followingIds.remove(targetUserId);
+      }
+      notifyListeners();
+    }
+  }
+
+  /// Fetches a single profile by id (from cache if present, otherwise the DB).
+  Future<UserProfile?> profileById(String id) async {
+    for (final p in _profiles) {
+      if (p.id == id) return p;
+    }
+    try {
+      final row = await supabase
+          .from('profiles')
+          .select()
+          .eq('id', id)
+          .maybeSingle();
+      if (row == null) return null;
+      return _profileFromRow(row);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Fetches a single profile by username.
+  Future<UserProfile?> profileByUsername(String username) async {
+    try {
+      final row = await supabase
+          .from('profiles')
+          .select()
+          .eq('username', username)
+          .maybeSingle();
+      if (row == null) return null;
+      return _profileFromRow(row);
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Updates the current user's editable fields, optimistically in memory and
-  /// then persisted to Supabase (fire-and-forget, guarded).
-  void updateProfile({String? displayName, String? bio}) {
-    _currentUser = _currentUser.copyWith(displayName: displayName, bio: bio);
+  /// then persisted. Reverts on failure. No-op when signed out.
+  Future<void> updateProfile({String? displayName, String? bio}) async {
+    final current = _currentUser;
+    if (current == null) return;
+    final myId = supabase.auth.currentUser?.id;
+    if (myId == null) return;
+
+    final changes = <String, dynamic>{
+      if (displayName != null) 'display_name': displayName,
+      if (bio != null) 'bio': bio,
+    };
+    if (changes.isEmpty) return;
+
+    _currentUser = current.copyWith(displayName: displayName, bio: bio);
     notifyListeners();
-    // ignore: discarded_futures
-    _persistProfile(displayName: displayName, bio: bio);
+
+    try {
+      await supabase.from('profiles').update(changes).eq('id', myId);
+    } catch (_) {
+      _currentUser = current;
+      notifyListeners();
+    }
   }
 
-  /// Persists editable profile fields to the Supabase `profiles` table.
-  Future<void> _persistProfile({String? displayName, String? bio}) async {
-    try {
-      final id = supabase.auth.currentUser?.id;
-      if (id == null) return;
-      final changes = <String, dynamic>{
-        if (displayName != null) 'display_name': displayName,
-        if (bio != null) 'bio': bio,
-      };
-      if (changes.isEmpty) return;
-      await supabase.from('profiles').update(changes).eq('id', id);
-    } catch (_) {
-      // Ignore persistence failures; the optimistic in-memory copy stands.
-    }
+  /// Clears cached state (e.g. on sign-out).
+  void clear() {
+    _currentUser = null;
+    _profiles.clear();
+    _followingIds.clear();
+    _status = LoadStatus.idle;
+    _error = null;
+    notifyListeners();
   }
 
   // -- Mapping -------------------------------------------------------------
 
-  /// Maps a `profiles` row to a [UserProfile].
   UserProfile _profileFromRow(Map<String, dynamic> row) {
     final username = (row['username'] as String?) ?? 'user';
     return UserProfile(

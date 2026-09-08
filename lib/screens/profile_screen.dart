@@ -41,7 +41,7 @@ class _ProfileScreenState extends State<ProfileScreen>
   }
 
   bool get _isCurrentUser =>
-      widget.profile.id == ProfileRepository.instance.currentUser.id;
+      widget.profile.id == ProfileRepository.instance.currentUser?.id;
 
   List<Post> get _userPosts => PostRepository.instance
       .forYou()

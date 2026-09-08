@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import '../data/profile_repository.dart';
+import '../data/notification_repository.dart';
 import '../models/notification_item.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
@@ -9,7 +9,7 @@ import '../utils/format.dart';
 import '../widgets/avatar.dart';
 import '../widgets/verified_badge.dart';
 
-/// Activity feed backed by [ProfileRepository.instance].
+/// Activity feed backed by [NotificationRepository.instance].
 class NotificationsScreen extends StatefulWidget {
   const NotificationsScreen({super.key});
 
@@ -25,15 +25,16 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
         title: const Text('Notifications'),
         actions: <Widget>[
           TextButton(
-            onPressed: ProfileRepository.instance.markNotificationsRead,
+            onPressed: () => NotificationRepository.instance
+                .markNotificationsRead(),
             child: const Text('Mark all read'),
           ),
         ],
       ),
       body: AnimatedBuilder(
-        animation: ProfileRepository.instance,
+        animation: NotificationRepository.instance,
         builder: (context, _) {
-          final items = ProfileRepository.instance.notifications();
+          final items = NotificationRepository.instance.notifications();
           return ListView.separated(
             itemCount: items.length,
             separatorBuilder: (_, __) => const Divider(height: 0.5),

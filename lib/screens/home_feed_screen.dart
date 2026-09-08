@@ -46,8 +46,8 @@ class _HomeFeedScreenState extends State<HomeFeedScreen>
             onTap: () => openProfile(context),
             child: Center(
               child: Avatar(
-                url: currentUser.avatarUrl,
-                displayName: currentUser.displayName,
+                url: currentUser?.avatarUrl,
+                displayName: currentUser?.displayName ?? 'You',
                 size: 32,
               ),
             ),
