@@ -190,19 +190,48 @@ flow used here.
   `StorageService.uploadReel` (bucket `reels`) via `uploadBinary` +
   `getPublicUrl`.
 
-> **`repost_count` limitation:** there is no `reposts` join table, so
-> `repost_count` is still written from the client (`_persistRepostCount`) and
-> can drift under concurrent clients (last-writer-wins). A production version
-> should add a `reposts` join table plus a trigger mirroring
-> `sync_post_like_count`. This is intentionally deferred to keep the schema
-> scope minimal for this pass (documented in `0001_init.sql` and the code).
+> **`repost_count`:** as of `0002_backend.sql` there is now a first-class
+> `reposts` join table with an `after insert or delete` trigger
+> (`sync_post_repost_count`) that recomputes `repost_count` from `count(*)`,
+> mirroring `sync_post_like_count`. The count is therefore database-owned and
+> no longer drifts under concurrent clients. (The client code in
+> `post_repository.dart` may still be migrated to toggle the `reposts` table
+> instead of writing `repost_count` directly — the schema now supports it.)
 
-**Still mock (`lib/data/mock_data.dart`):**
+### Backend schema extension — `0002_backend.sql` / `0003_harden_functions.sql`
+
+The initial `0001_init.sql` covered `profiles`, `posts`, `reels`, `likes`,
+`follows`. `0002_backend.sql` extends the backend so the previously mock-only
+features have real tables, and `0003_harden_functions.sql` locks down the
+`SECURITY DEFINER` trigger functions (revokes their RPC `EXECUTE` so they can
+only run from their triggers, clearing the database-linter warnings). Added:
+
+- **Replies** — `posts.parent_id` (self-referencing FK); a trigger
+  (`sync_post_reply_count`) keeps `posts.reply_count` server-authoritative.
+- **Reposts** — `reposts` join table + `sync_post_repost_count` trigger.
+- **Bookmarks** — `bookmarks` join table (**private:** owner-scoped SELECT), so
+  `Post.bookmarked` can persist per user.
+- **Follower/following counts** — `sync_follow_counts` trigger keeps
+  `profiles.followers` / `profiles.following` in sync from `follows`.
+- **Notifications** — `notifications` table + `notification_type` enum
+  (`like`/`reply`/`repost`/`follow`/`mention`), recipient-scoped RLS.
+- **Direct messages** — `conversations`, `conversation_participants`, and
+  `messages` tables with participant-scoped RLS (via the
+  `is_conversation_participant` helper). A `handle_new_message` trigger updates
+  the conversation preview/`updated_at` and bumps each recipient's `unread`.
+
+All tables have RLS enabled. The migrations have been applied to the hosted
+Oneleven project and verified end-to-end (new-user, like/reply/repost/follow
+counters, and message unread all confirmed via a smoke test).
+
+**Still mock in the app (`lib/data/mock_data.dart`) — schema now exists, client wiring pending:**
 
 - Notifications (`ProfileRepository.notifications()` / `unreadNotifications` /
-  `markNotificationsRead`) — no notifications table yet.
+  `markNotificationsRead`) — the `notifications` table now exists; the
+  repository can be pointed at it.
 - Conversations / direct messages (`conversations()` / `unreadMessages` /
-  `conversationById`) — no messaging table yet.
+  `conversationById`) — the `conversations` / `conversation_participants` /
+  `messages` tables now exist; the repository can be pointed at them.
 
 **Graceful fallback:** the repositories seed their in-memory caches from
 `MockData` at construction and hydrate from Supabase asynchronously
