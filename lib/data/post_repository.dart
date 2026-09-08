@@ -3,6 +3,8 @@ import 'package:flutter/foundation.dart';
 import '../models/post.dart';
 import '../models/user_profile.dart';
 import '../supabase_config.dart';
+import 'feed_page.dart';
+import 'feed_ranking.dart';
 import 'mock_data.dart';
 
 /// The post store for the app, backed by Supabase.
@@ -24,7 +26,9 @@ import 'mock_data.dart';
 /// optimistically and fire exactly one [notifyListeners]; the Supabase write is
 /// a separate fire-and-forget helper that never throws into the UI.
 class PostRepository extends ChangeNotifier {
-  PostRepository() : _posts = MockData.posts() {
+  PostRepository({FeedRankingStrategy? ranking})
+      : _ranking = ranking ?? const ChronologicalRanking(),
+        _posts = MockData.posts() {
     // Hydrate from Supabase in the background. Guarded so it is a no-op when
     // Supabase is unavailable (tests / offline), leaving the mock seed intact.
     // ignore: discarded_futures
@@ -34,32 +38,41 @@ class PostRepository extends ChangeNotifier {
   /// Shared singleton for the app.
   static final PostRepository instance = PostRepository();
 
+  /// The strategy that orders feeds. Defaults to [ChronologicalRanking]
+  /// (newest-first), preserving the app's current behavior; swap it for a
+  /// scored/personalized strategy without touching this class.
+  final FeedRankingStrategy _ranking;
+
   final List<Post> _posts;
 
-  /// The "For you" timeline (all posts, newest first).
+  /// The "For you" timeline (all posts, ranked by [_ranking]).
   List<Post> forYou() {
-    final list = List<Post>.of(_posts);
-    list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
-    return List<Post>.unmodifiable(list);
+    return List<Post>.unmodifiable(_ranking.rank(_posts));
   }
 
-  /// The "Following" timeline (a subset by author).
+  /// The "Following" timeline (a subset by author, ranked by [_ranking]).
   List<Post> following() {
     final followedIds = MockData.followingPosts().map((p) => p.author.id).toSet();
-    final list = _posts.where((p) => followedIds.contains(p.author.id)).toList();
-    list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
-    return List<Post>.unmodifiable(list);
+    final subset = _posts.where((p) => followedIds.contains(p.author.id)).toList();
+    return List<Post>.unmodifiable(_ranking.rank(subset));
   }
 
-  /// Hydrates [_posts] from Supabase. Fire-and-forget; fully guarded so it
-  /// never throws (e.g. when Supabase is uninitialized under tests) and only
-  /// notifies when it actually replaces the cache with live rows.
+  /// Hydrates [_posts] from Supabase with a BOUNDED, keyset-ordered query.
+  ///
+  /// The query is capped at [kFeedPageSize] rows and ordered by
+  /// `(created_at desc, id desc)` so it (a) never issues an unbounded select
+  /// and (b) lines up with the `(created_at desc, id)` index for
+  /// keyset-paginated [loadMore]. Fire-and-forget; fully guarded so it never
+  /// throws (e.g. when Supabase is uninitialized under tests) and only notifies
+  /// when it actually replaces the cache with live rows.
   Future<void> load() async {
     try {
       final rows = await supabase
           .from('posts')
           .select('*, profiles(*)')
-          .order('created_at', ascending: false);
+          .order('created_at', ascending: false)
+          .order('id', ascending: false)
+          .limit(kFeedPageSize);
       final data = (rows as List).cast<Map<String, dynamic>>();
       if (data.isEmpty) return; // keep the mock seed as a graceful fallback
       final mapped = data.map(_postFromRow).toList();
@@ -70,6 +83,48 @@ class PostRepository extends ChangeNotifier {
     } catch (_) {
       // Supabase unavailable/unauthenticated or query failed: keep the mock
       // seed. Never throw into construction or the UI.
+    }
+  }
+
+  /// Fetches the next bounded page after [cursor] using a keyset predicate.
+  ///
+  /// Uses `(created_at, id) < (cursor.createdAt, cursor.id)` expressed as an
+  /// `or` composite over the `(created_at desc, id)` index. This is seek-based,
+  /// never `offset`-based (which degrades at scale), and is bounded to
+  /// [kFeedPageSize]. Newly fetched rows are appended to the cache (de-duped by
+  /// id) and a single [notifyListeners] fires only when real rows arrive.
+  /// Returns a [FeedPage] describing the fetched rows; returns [FeedPage.empty]
+  /// when Supabase is unavailable or there is nothing more to load.
+  Future<FeedPage> loadMore(FeedCursor cursor) async {
+    try {
+      final iso = cursor.createdAt.toUtc().toIso8601String();
+      final rows = await supabase
+          .from('posts')
+          .select('*, profiles(*)')
+          .or(
+            'created_at.lt.$iso,'
+            'and(created_at.eq.$iso,id.lt.${cursor.id})',
+          )
+          .order('created_at', ascending: false)
+          .order('id', ascending: false)
+          .limit(kFeedPageSize);
+      final data = (rows as List).cast<Map<String, dynamic>>();
+      if (data.isEmpty) return FeedPage.empty;
+      final mapped = data.map(_postFromRow).toList();
+      final existingIds = _posts.map((p) => p.id).toSet();
+      final fresh = mapped.where((p) => !existingIds.contains(p.id)).toList();
+      if (fresh.isNotEmpty) {
+        _posts.addAll(fresh);
+        notifyListeners();
+      }
+      return FeedPage(
+        posts: mapped,
+        nextCursor: FeedCursor.fromPost(mapped.last),
+        hasMore: mapped.length == kFeedPageSize,
+      );
+    } catch (_) {
+      // Supabase unavailable/unauthenticated or query failed: no more rows.
+      return FeedPage.empty;
     }
   }
 
@@ -106,7 +161,7 @@ class PostRepository extends ChangeNotifier {
     _posts[i] = updated;
     notifyListeners();
     // ignore: discarded_futures
-    _persistRepostCount(updated);
+    _persistRepost(updated);
     return updated;
   }
 
@@ -165,22 +220,35 @@ class PostRepository extends ChangeNotifier {
     }
   }
 
-  /// Reflects a repost toggle into the post's `repost_count`.
+  /// Reflects a repost toggle into the `reposts` join table only.
   ///
-  /// Known limitation: unlike likes, there is no `reposts` join table, so this
-  /// counter is client-authoritative and can drift under concurrent clients
-  /// (last-writer-wins). A production version should add a `reposts` join
-  /// table plus a trigger mirroring `sync_post_like_count`, and stop writing
-  /// `repost_count` from the client. Kept as-is for this pass to avoid
-  /// expanding the schema/scope; documented in the migration and README.
-  Future<void> _persistRepostCount(Post post) async {
+  /// As of migration `0002_authz_and_core_tables.sql`, `posts.repost_count` is
+  /// owned by the database: an `after insert or delete` trigger on `reposts`
+  /// (`sync_post_repost_count`) recomputes it from `count(*)`, exactly like
+  /// `sync_post_like_count` does for likes. This retires the old
+  /// client-authoritative `repost_count` write, which raced with concurrent
+  /// clients and drifted from the true repost set. The client now only records
+  /// the user's repost/un-repost keyed by `(user_id, post_id)` and lets the
+  /// server reconcile the count; the local optimistic count is a display-only
+  /// estimate until the next [load]. No-op/guarded when Supabase is unavailable.
+  Future<void> _persistRepost(Post post) async {
     try {
-      await supabase
-          .from('posts')
-          .update(<String, dynamic>{'repost_count': post.repostCount})
-          .eq('id', post.id);
+      final userId = supabase.auth.currentUser?.id;
+      if (userId == null) return;
+      if (post.reposted) {
+        await supabase.from('reposts').insert(<String, dynamic>{
+          'user_id': userId,
+          'post_id': post.id,
+        });
+      } else {
+        await supabase
+            .from('reposts')
+            .delete()
+            .eq('user_id', userId)
+            .eq('post_id', post.id);
+      }
     } catch (_) {
-      // Ignore persistence failures.
+      // Ignore persistence failures; the optimistic in-memory state stands.
     }
   }
 
