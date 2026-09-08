@@ -31,9 +31,12 @@ class PostRepository extends ChangeNotifier {
   static final PostRepository instance = PostRepository();
 
   final List<Post> _posts = <Post>[];
+  final List<Post> _followingPosts = <Post>[];
   final Set<String> _followingIds = <String>{};
   LoadStatus _status = LoadStatus.idle;
+  LoadStatus _followingStatus = LoadStatus.idle;
   Object? _error;
+  Object? _followingError;
   Object? _lastError;
 
   /// The current load state of the timeline.
@@ -57,11 +60,20 @@ class PostRepository extends ChangeNotifier {
     return List<Post>.unmodifiable(list);
   }
 
+  /// The current load state of the Following timeline.
+  LoadStatus get followingStatus => _followingStatus;
+
+  /// The most recent Following-timeline load error, if any.
+  Object? get followingError => _followingError;
+
   /// The "Following" timeline: top-level posts by authors the current user
-  /// actually follows, newest first.
+  /// follows, newest first. Backed by a dedicated query (see [loadFollowingFeed])
+  /// so followed authors whose posts fall outside the For-You fetch still show.
   List<Post> following() {
-    final list = _posts
-        .where((p) => _followingIds.contains(p.author.id))
+    // Overlay live toggle state from the For-You cache when the same post is
+    // present there, so a like/repost in one tab reflects in the other.
+    final list = _followingPosts
+        .map((p) => postById(p.id) ?? p)
         .toList()
       ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
     return List<Post>.unmodifiable(list);
@@ -90,9 +102,54 @@ class PostRepository extends ChangeNotifier {
 
       _status = LoadStatus.loaded;
       notifyListeners();
+
+      // Load the Following timeline with its own dedicated query so it is
+      // authoritative rather than a filtered view of the For-You cache.
+      await loadFollowingFeed();
     } catch (e) {
       _error = e;
       _status = LoadStatus.error;
+      notifyListeners();
+    }
+  }
+
+  /// Loads the Following timeline: top-level posts whose owner is in the
+  /// current user's follow set, newest first, joined to the author profile.
+  /// Uses its own query (not the For-You cache) so a followed author's older
+  /// posts still appear. Sets [followingStatus] and notifies in every outcome.
+  /// Never throws into the UI.
+  Future<void> loadFollowingFeed() async {
+    _followingStatus = LoadStatus.loading;
+    _followingError = null;
+    notifyListeners();
+    try {
+      // Refresh the follow set first so a manual refresh (and follows made
+      // since the last full load) are reflected authoritatively.
+      await loadFollowing();
+      final myId = supabase.auth.currentUser?.id;
+      if (myId == null || _followingIds.isEmpty) {
+        _followingPosts.clear();
+        _followingStatus = LoadStatus.loaded;
+        notifyListeners();
+        return;
+      }
+      final rows = await supabase
+          .from('posts')
+          .select('*, profiles(*)')
+          .isFilter('parent_id', null)
+          .inFilter('owner', _followingIds.toList())
+          .order('created_at', ascending: false);
+      final data = (rows as List).cast<Map<String, dynamic>>();
+      final posts = data.map(_postFromRow).toList();
+      _applyEngagementFlags(posts);
+      _followingPosts
+        ..clear()
+        ..addAll(posts);
+      _followingStatus = LoadStatus.loaded;
+      notifyListeners();
+    } catch (e) {
+      _followingError = e;
+      _followingStatus = LoadStatus.error;
       notifyListeners();
     }
   }
@@ -526,9 +583,12 @@ class PostRepository extends ChangeNotifier {
   /// Clears the cache and follow set (e.g. on sign-out).
   void clear() {
     _posts.clear();
+    _followingPosts.clear();
     _followingIds.clear();
     _status = LoadStatus.idle;
+    _followingStatus = LoadStatus.idle;
     _error = null;
+    _followingError = null;
     _lastError = null;
     notifyListeners();
   }

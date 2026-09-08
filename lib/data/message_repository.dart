@@ -273,55 +273,27 @@ class MessageRepository extends ChangeNotifier {
     }
   }
 
-  /// Finds an existing 1:1 conversation with [otherUserId], or creates one
-  /// (a `conversations` row plus two `conversation_participants` rows) and
-  /// returns its id. Returns null when signed out or on failure.
+  /// Finds an existing 1:1 conversation with [otherUserId], or creates one,
+  /// and returns its id. Returns null when signed out or on failure.
+  ///
+  /// Delegates to the `create_direct_conversation` SECURITY DEFINER RPC, which
+  /// finds-or-creates the conversation and inserts BOTH participant rows
+  /// atomically. This avoids the RLS pitfall of the old client-side batch
+  /// insert: the `participants_insert_self_or_member` check
+  /// (`auth.uid() = user_id OR is_conversation_participant(conversation_id)`)
+  /// rejects the other user's row in a single multi-row INSERT because the
+  /// caller's sibling row is not yet visible to `is_conversation_participant`.
   Future<String?> openOrCreateConversationWith(String otherUserId) async {
     try {
       final myId = supabase.auth.currentUser?.id;
       if (myId == null || otherUserId == myId) return null;
 
-      // Look for an existing thread that both users participate in.
-      final myRows = await supabase
-          .from('conversation_participants')
-          .select('conversation_id')
-          .eq('user_id', myId);
-      final myConvIds = (myRows as List)
-          .cast<Map<String, dynamic>>()
-          .map((r) => r['conversation_id']?.toString() ?? '')
-          .where((id) => id.isNotEmpty)
-          .toList();
-
-      if (myConvIds.isNotEmpty) {
-        final shared = await supabase
-            .from('conversation_participants')
-            .select('conversation_id')
-            .eq('user_id', otherUserId)
-            .inFilter('conversation_id', myConvIds);
-        final sharedList = (shared as List).cast<Map<String, dynamic>>();
-        if (sharedList.isNotEmpty) {
-          final existingId =
-              sharedList.first['conversation_id']?.toString() ?? '';
-          if (existingId.isNotEmpty) {
-            await load();
-            return existingId;
-          }
-        }
-      }
-
-      // None exists: create the shell and add both participants.
-      final conv = await supabase
-          .from('conversations')
-          .insert(<String, dynamic>{})
-          .select('id')
-          .single();
-      final convId = conv['id']?.toString() ?? '';
+      final result = await supabase.rpc(
+        'create_direct_conversation',
+        params: <String, dynamic>{'other_user': otherUserId},
+      );
+      final convId = result?.toString() ?? '';
       if (convId.isEmpty) return null;
-
-      await supabase.from('conversation_participants').insert(<Map<String, dynamic>>[
-        <String, dynamic>{'conversation_id': convId, 'user_id': myId},
-        <String, dynamic>{'conversation_id': convId, 'user_id': otherUserId},
-      ]);
 
       await load();
       return convId;

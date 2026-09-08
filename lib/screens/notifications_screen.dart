@@ -208,9 +208,28 @@ class _NotificationTile extends StatelessWidget {
     }
   }
 
+  /// A human action phrase describing what the actor did, so the tile never
+  /// reads as a bare "Name  <post text>" fragment. The optional post preview
+  /// is rendered separately as secondary text.
+  String get _actionPhrase {
+    switch (item.type) {
+      case NotificationType.like:
+        return 'liked your post';
+      case NotificationType.reply:
+        return 'replied to your post';
+      case NotificationType.repost:
+        return 'reposted your post';
+      case NotificationType.follow:
+        return 'started following you';
+      case NotificationType.mention:
+        return 'mentioned you';
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final actor = item.actor;
+    final preview = item.preview?.trim();
     return InkWell(
       onTap: onTap,
       child: Container(
@@ -250,12 +269,21 @@ class _NotificationTile extends StatelessWidget {
                           ),
                         ],
                         TextSpan(
-                          text: '  ${item.preview ?? ''}',
+                          text: ' $_actionPhrase',
                           style: AppTextStyles.body,
                         ),
                       ],
                     ),
                   ),
+                  if (preview != null && preview.isNotEmpty) ...<Widget>[
+                    const SizedBox(height: 2),
+                    Text(
+                      preview,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: AppTextStyles.handle,
+                    ),
+                  ],
                   const SizedBox(height: 2),
                   Text(timeAgo(item.createdAt), style: AppTextStyles.caption),
                 ],

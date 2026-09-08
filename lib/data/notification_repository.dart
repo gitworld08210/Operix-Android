@@ -169,6 +169,24 @@ class NotificationRepository extends ChangeNotifier {
     try {
       final actor = supabase.auth.currentUser?.id;
       if (actor == null || actor == recipient) return;
+
+      // De-dupe repeat notifications: toggling a like/repost off and on again,
+      // or re-following, should not spam a fresh row each time. Only insert
+      // when no matching (actor, recipient, type, post) notification exists.
+      // The whole method is guarded by the outer try/catch, so this probe
+      // never breaks the primary action.
+      var existing = supabase
+          .from('notifications')
+          .select('id')
+          .eq('recipient', recipient)
+          .eq('actor', actor)
+          .eq('type', type.name);
+      existing = postId != null
+          ? existing.eq('post_id', postId)
+          : existing.isFilter('post_id', null);
+      final priorRows = await existing.limit(1);
+      if ((priorRows as List).isNotEmpty) return;
+
       await supabase.from('notifications').insert(<String, dynamic>{
         'recipient': recipient,
         'actor': actor,

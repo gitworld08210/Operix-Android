@@ -193,12 +193,21 @@ class ProfileRepository extends ChangeNotifier {
   Future<List<UserProfile>> suggestedProfiles({int limit = 20}) async {
     try {
       final myId = supabase.auth.currentUser?.id;
-      final rows = await supabase.from('profiles').select().limit(limit);
+      // Exclude self and already-followed ids IN THE QUERY so the limit applies
+      // to the eligible rows only (filtering after .limit() would let excluded
+      // rows consume slots and shrink the list).
+      final excludeIds = <String>{
+        if (myId != null) myId,
+        ..._followingIds,
+      };
+      var query = supabase.from('profiles').select();
+      if (excludeIds.isNotEmpty) {
+        // PostgREST not-in list: id=not.in.(a,b,c)
+        query = query.not('id', 'in', '(${excludeIds.join(',')})');
+      }
+      final rows = await query.limit(limit);
       final data = (rows as List).cast<Map<String, dynamic>>();
-      return data
-          .map(_profileFromRow)
-          .where((p) => p.id != myId && !_followingIds.contains(p.id))
-          .toList(growable: false);
+      return data.map(_profileFromRow).toList(growable: false);
     } catch (_) {
       return const <UserProfile>[];
     }

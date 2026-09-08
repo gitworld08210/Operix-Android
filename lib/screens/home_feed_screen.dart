@@ -99,11 +99,13 @@ class _HomeFeedScreenState extends State<HomeFeedScreen>
                 posts: repo.forYou(),
                 status: repo.status,
                 emptyKind: _EmptyKind.forYou,
+                onRefresh: repo.load,
               ),
               _FeedTab(
                 posts: repo.following(),
-                status: repo.status,
+                status: repo.followingStatus,
                 emptyKind: _EmptyKind.following,
+                onRefresh: repo.loadFollowingFeed,
               ),
             ],
           );
@@ -120,13 +122,15 @@ class _FeedTab extends StatelessWidget {
     required this.posts,
     required this.status,
     required this.emptyKind,
+    required this.onRefresh,
   });
 
   final List<Post> posts;
   final LoadStatus status;
   final _EmptyKind emptyKind;
+  final Future<void> Function() onRefresh;
 
-  Future<void> _refresh() => PostRepository.instance.load();
+  Future<void> _refresh() => onRefresh();
 
   @override
   Widget build(BuildContext context) {
