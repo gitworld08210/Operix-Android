@@ -29,11 +29,42 @@ List<Post> filterHidden(
   List<Post> posts, {
   required Set<String> blocked,
   required Set<String> muted,
+  Set<String> muteWords = const <String>{},
 }) {
-  if (blocked.isEmpty && muted.isEmpty) return posts;
+  if (blocked.isEmpty && muted.isEmpty && muteWords.isEmpty) return posts;
   return posts
-      .where((p) => !blocked.contains(p.author.id) && !muted.contains(p.author.id))
+      .where((p) =>
+          !blocked.contains(p.author.id) &&
+          !muted.contains(p.author.id) &&
+          !contentMatchesMuteWords(p.content, muteWords))
       .toList();
+}
+
+/// Whether [content] contains any of the [words] on a WORD BOUNDARY.
+///
+/// PURE + independently unit-tested — a product differentiator for the
+/// keyword-mute surface. It is:
+///
+///  * case-insensitive (both the content and each word are compared
+///    lower-cased); and
+///  * word-boundary aware, so muting `art` hides "the art show" but NOT
+///    "startup" — the word must be delimited by non-alphanumeric characters (or
+///    the start/end of the string), matched via a `\b<escaped-word>\b` regex
+///    with the word's own regex metacharacters escaped.
+///
+/// An EMPTY word set matches nothing (returns false), which keeps [filterHidden]
+/// identity on the default (empty) mute-word list so existing feed assertions
+/// never shift.
+bool contentMatchesMuteWords(String content, Set<String> words) {
+  if (words.isEmpty || content.isEmpty) return false;
+  final haystack = content.toLowerCase();
+  for (final raw in words) {
+    final word = raw.trim().toLowerCase();
+    if (word.isEmpty) continue;
+    final pattern = RegExp('\\b${RegExp.escape(word)}\\b');
+    if (pattern.hasMatch(haystack)) return true;
+  }
+  return false;
 }
 
 /// Owns the viewer's SAFETY state: the set of accounts they have blocked, the
@@ -70,7 +101,11 @@ List<Post> filterHidden(
 class SafetyRepository extends ChangeNotifier {
   SafetyRepository()
       : _blocked = Set<String>.of(MockData.blockedUserIds()),
-        _muted = Set<String>.of(MockData.mutedUserIds()) {
+        _muted = Set<String>.of(MockData.mutedUserIds()),
+        _muteWords = <String>{
+          for (final w in MockData.muteWords())
+            if (w.trim().isNotEmpty) w.trim().toLowerCase(),
+        } {
     // Hydrate the block set from Supabase in the background. Guarded so it is a
     // no-op when Supabase is unavailable (tests / offline), leaving the mock
     // seed intact.
@@ -85,14 +120,30 @@ class SafetyRepository extends ChangeNotifier {
   /// (`char_length(reason) between 1 and 500`).
   static const int maxReasonLength = 500;
 
+  /// Maximum length of a single mute word/phrase, validated client-side by
+  /// the muted-words UI (a small, sensible cap; there is no server table).
+  static const int maxMuteWordLength = 60;
+
   final Set<String> _blocked;
   final Set<String> _muted;
+  final Set<String> _muteWords;
 
   /// The ids of accounts the viewer has blocked (unmodifiable view).
   Set<String> get blockedIds => Set<String>.unmodifiable(_blocked);
 
   /// The ids of accounts the viewer has muted (unmodifiable view).
   Set<String> get mutedIds => Set<String>.unmodifiable(_muted);
+
+  /// The viewer's muted keywords/phrases (normalized: trimmed + lower-cased +
+  /// de-duped), returned as an unmodifiable, alphabetically sorted list for
+  /// stable rendering.
+  List<String> get muteWords {
+    final list = _muteWords.toList()..sort();
+    return List<String>.unmodifiable(list);
+  }
+
+  /// The muted keywords as a set, used by the feed filter's pure matcher.
+  Set<String> get muteWordSet => Set<String>.unmodifiable(_muteWords);
 
   /// Whether [userId] is blocked by the viewer.
   bool isBlocked(String userId) => _blocked.contains(userId);
@@ -163,6 +214,28 @@ class SafetyRepository extends ChangeNotifier {
   /// Unmutes [userId] optimistically. Idempotent (see [unblock]).
   void unmute(String userId) {
     if (!_muted.remove(userId)) return; // idempotent: nothing to remove
+    notifyListeners();
+  }
+
+  // -- Mute words (client-authoritative keyword filtering) -----------------
+
+  /// Adds a muted keyword/phrase, normalized (trimmed + lower-cased). Idempotent
+  /// and de-duped: no [notifyListeners] when the (normalized) word is empty or
+  /// already present. Mute words are client-authoritative (no server table);
+  /// nothing is persisted. They hide any post whose content matches the word on
+  /// a word boundary via [contentMatchesMuteWords] on the feed-filter path.
+  void addMuteWord(String word) {
+    final normalized = word.trim().toLowerCase();
+    if (normalized.isEmpty) return; // nothing to add
+    if (!_muteWords.add(normalized)) return; // idempotent: already present
+    notifyListeners();
+  }
+
+  /// Removes a muted keyword/phrase (matched after normalization). Idempotent:
+  /// no [notifyListeners] when the word is not currently muted.
+  void removeMuteWord(String word) {
+    final normalized = word.trim().toLowerCase();
+    if (!_muteWords.remove(normalized)) return; // idempotent: nothing to remove
     notifyListeners();
   }
 

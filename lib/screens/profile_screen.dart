@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../data/auth_repository.dart';
 import '../data/post_repository.dart';
 import '../data/profile_repository.dart';
+import '../data/relationship_repository.dart';
 import '../data/safety_repository.dart';
 import '../models/post.dart';
 import '../models/user_profile.dart';
@@ -128,6 +129,29 @@ class _ProfileScreenState extends State<ProfileScreen>
     }
   }
 
+  void _onFollowTap() {
+    final rel = RelationshipRepository.instance;
+    final profile = widget.profile;
+    final state = rel.followStateFor(profile.id);
+    if (state == FollowState.none) {
+      rel.follow(profile);
+      _snack(
+        profile.isPrivate
+            ? 'Requested to follow @${profile.username}'
+            : 'Following @${profile.username}',
+        undo: () => rel.unfollow(profile.id),
+      );
+    } else {
+      // Following or Requested -> unfollow / cancel the request.
+      rel.unfollow(profile.id);
+      _snack(
+        state == FollowState.requested
+            ? 'Request cancelled'
+            : 'Unfollowed @${profile.username}',
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final profile = widget.profile;
@@ -136,12 +160,21 @@ class _ProfileScreenState extends State<ProfileScreen>
         animation: Listenable.merge(<Listenable>[
           PostRepository.instance,
           SafetyRepository.instance,
+          RelationshipRepository.instance,
         ]),
         builder: (context, _) {
           final posts = _userPosts;
           final media = posts.where((p) => p.hasMedia).toList();
           final isBlocked = SafetyRepository.instance.isBlocked(profile.id);
           final isMuted = SafetyRepository.instance.isMuted(profile.id);
+          final followState =
+              RelationshipRepository.instance.followStateFor(profile.id);
+          // A private account's content is gated until the viewer's follow is
+          // accepted. This is a UX mirror of the server's can_view_profile
+          // gate (migration 0002), which is the TRUE enforcement.
+          final isPrivateGated = !_isCurrentUser &&
+              profile.isPrivate &&
+              followState != FollowState.following;
           return NestedScrollView(
             headerSliverBuilder: (context, _) => <Widget>[
               SliverAppBar(
@@ -191,7 +224,9 @@ class _ProfileScreenState extends State<ProfileScreen>
                   profile: profile,
                   isCurrentUser: _isCurrentUser,
                   isBlocked: isBlocked,
+                  followState: followState,
                   onEditProfile: _openEditProfile,
+                  onFollowTap: _onFollowTap,
                 ),
               ),
               SliverPersistentHeader(
@@ -212,13 +247,15 @@ class _ProfileScreenState extends State<ProfileScreen>
                 ),
               ),
             ],
-            body: TabBarView(
-              controller: _tabController,
-              children: <Widget>[
-                _PostsTab(posts: posts),
-                _MediaGrid(posts: media),
-              ],
-            ),
+            body: isPrivateGated
+                ? const _PrivateAccountGate()
+                : TabBarView(
+                    controller: _tabController,
+                    children: <Widget>[
+                      _PostsTab(posts: posts),
+                      _MediaGrid(posts: media),
+                    ],
+                  ),
           );
         },
       ),
@@ -255,13 +292,28 @@ class _ProfileHeader extends StatelessWidget {
     required this.profile,
     required this.isCurrentUser,
     required this.isBlocked,
+    required this.followState,
     required this.onEditProfile,
+    required this.onFollowTap,
   });
 
   final UserProfile profile;
   final bool isCurrentUser;
   final bool isBlocked;
+  final FollowState followState;
   final VoidCallback onEditProfile;
+  final VoidCallback onFollowTap;
+
+  String get _followLabel {
+    switch (followState) {
+      case FollowState.none:
+        return 'Follow';
+      case FollowState.requested:
+        return 'Requested';
+      case FollowState.following:
+        return 'Following';
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -298,16 +350,30 @@ class _ProfileHeader extends StatelessWidget {
                   // source is wired (no image_picker dependency is bundled, to
                   // keep deps minimal).
                   child: OutlinedButton(
-                    onPressed: isCurrentUser ? onEditProfile : null,
+                    onPressed: isCurrentUser
+                        ? onEditProfile
+                        : (isBlocked ? null : onFollowTap),
                     style: OutlinedButton.styleFrom(
                       foregroundColor: AppColors.primaryText,
                       side: const BorderSide(color: AppColors.border),
                       shape: const StadiumBorder(),
                     ),
-                    child: Text(
-                      isCurrentUser
-                          ? 'Edit profile'
-                          : (isBlocked ? 'Blocked' : 'Follow'),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        if (!isCurrentUser &&
+                            !isBlocked &&
+                            profile.isPrivate &&
+                            followState != FollowState.following) ...<Widget>[
+                          const Icon(Icons.lock_outline, size: 15),
+                          const SizedBox(width: 4),
+                        ],
+                        Text(
+                          isCurrentUser
+                              ? 'Edit profile'
+                              : (isBlocked ? 'Blocked' : _followLabel),
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -459,6 +525,40 @@ class _MediaGrid extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// Shown in place of the tab content when a private account has not accepted
+/// the viewer's follow. This is a UX mirror of the server-side
+/// `can_view_profile` gate (migration 0002), which is the true enforcement.
+class _PrivateAccountGate extends StatelessWidget {
+  const _PrivateAccountGate();
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(AppSpacing.xxl),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            const Icon(
+              Icons.lock_outline,
+              size: 44,
+              color: AppColors.secondaryText,
+            ),
+            const SizedBox(height: AppSpacing.md),
+            Text('This account is private', style: AppTextStyles.title),
+            const SizedBox(height: AppSpacing.xs),
+            Text(
+              'Follow this account to see their posts and media.',
+              textAlign: TextAlign.center,
+              style: AppTextStyles.handle,
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

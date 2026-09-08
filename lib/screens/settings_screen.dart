@@ -7,6 +7,7 @@ import '../theme/app_text_styles.dart';
 import '../theme/app_theme.dart';
 import 'blocked_muted_screen.dart';
 import 'edit_profile_screen.dart';
+import 'muted_words_screen.dart';
 
 /// Account & settings surface, reachable from the profile screen.
 ///
@@ -205,6 +206,21 @@ class SettingsScreen extends StatelessWidget {
                     builder: (_) => const BlockedMutedScreen(
                       kind: SafetyListKind.muted,
                     ),
+                  ),
+                ),
+              ),
+              ListTile(
+                leading: const Icon(Icons.tag_outlined),
+                title: const Text('Muted words'),
+                subtitle: Text(
+                  'Hide posts containing words or phrases you choose.',
+                  style: AppTextStyles.caption,
+                ),
+                trailing: const Icon(Icons.chevron_right,
+                    color: AppColors.secondaryText),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const MutedWordsScreen(),
                   ),
                 ),
               ),

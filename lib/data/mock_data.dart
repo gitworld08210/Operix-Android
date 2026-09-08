@@ -116,10 +116,26 @@ abstract final class MockData {
   /// table), so this is the sole source of truth offline.
   static Set<String> mutedUserIds() => <String>{};
 
-  /// Seed set of muted keywords. Deliberately EMPTY; reserved for a later
-  /// keyword-mute product surface. Kept here so the safety seed lives with the
-  /// other mock data.
+  /// Seed set of muted keywords. Deliberately EMPTY so an empty
+  /// [SafetyRepository] keeps the feed a pure pass-through (existing feed
+  /// assertions must not shift). The keyword-mute surface (FEAT-007) reads and
+  /// writes this list; it is client-authoritative and in-memory only.
   static Set<String> muteWords() => <String>{};
+
+  // -- Relationships (follow edges / requests) -----------------------------
+
+  /// Seed of the current user's OUTGOING follow edges, keyed by followee id
+  /// with a follow status ('pending' | 'accepted'). Deliberately EMPTY so the
+  /// profile 'Follow' button starts at [FollowState.none] for every account and
+  /// no existing feed/notification assertion shifts. Follow edges are also
+  /// server-backed (public.follows); this is only the offline/mock seed.
+  static Map<String, String> followEdges() => <String, String>{};
+
+  /// Seed of INCOMING pending follow requests (accounts asking to follow the
+  /// current user). Mirrors the `followRequest` notification already present in
+  /// [notifications] (from [citydesk]) so the requests UI has something to show
+  /// on the mock/offline path. Newest-first is enforced by the repository.
+  static List<UserProfile> pendingFollowRequests() => <UserProfile>[citydesk];
 
   // -- Posts ---------------------------------------------------------------
 

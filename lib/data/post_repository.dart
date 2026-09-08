@@ -48,10 +48,11 @@ class PostRepository extends ChangeNotifier {
 
   /// The "For you" timeline (all posts, ranked by [_ranking]).
   ///
-  /// Blocked/muted authors are hidden via the pure [filterHidden] helper,
-  /// applied AFTER ranking so ordering is unchanged for visible posts. The
-  /// filter is IDENTITY when the safety sets are empty (the default), so this
-  /// preserves the exact feed contents/ordering the repository tests assert.
+  /// Blocked/muted authors AND posts matching a muted keyword are hidden via
+  /// the pure [filterHidden] helper, applied AFTER ranking so ordering is
+  /// unchanged for visible posts. The filter is IDENTITY when the safety sets
+  /// and the mute-word set are all empty (the default), so this preserves the
+  /// exact feed contents/ordering the repository tests assert.
   List<Post> forYou() {
     return List<Post>.unmodifiable(_visible(_ranking.rank(_posts)));
   }
@@ -72,6 +73,7 @@ class PostRepository extends ChangeNotifier {
       ranked,
       blocked: safety.blockedIds,
       muted: safety.mutedIds,
+      muteWords: safety.muteWordSet,
     );
   }
 
