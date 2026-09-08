@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../models/conversation.dart';
 import '../models/user_profile.dart';
@@ -27,6 +28,24 @@ class MessageRepository extends ChangeNotifier {
   final List<Conversation> _conversations = <Conversation>[];
   LoadStatus _status = LoadStatus.idle;
   Object? _error;
+
+  /// Live subscription to `messages` inserts. A single channel covers all of
+  /// the user's conversations; inserts for conversations the user does not
+  /// participate in are ignored. Created in [load] and torn down in
+  /// [clear]/[dispose].
+  RealtimeChannel? _channel;
+
+  /// The conversation currently open on screen, if any. Messages arriving for
+  /// this conversation are treated as already-seen so they do not inflate the
+  /// unread badge. Set via [setActiveConversation].
+  String? _activeConversationId;
+
+  /// Marks [conversationId] as the conversation currently on screen (or null
+  /// when none is open) so live inbound messages for it are not counted as
+  /// unread. Called by ConversationScreen on open/dispose.
+  void setActiveConversation(String? conversationId) {
+    _activeConversationId = conversationId;
+  }
 
   /// The current load state of [conversations].
   LoadStatus get status => _status;
@@ -128,10 +147,65 @@ class MessageRepository extends ChangeNotifier {
         ..addAll(mapped);
       _status = LoadStatus.loaded;
       notifyListeners();
+      _subscribe(myId);
     } catch (e) {
       _error = e;
       _status = LoadStatus.error;
       notifyListeners();
+    }
+  }
+
+  /// Subscribes (once) to realtime inserts on `messages`. Because the payload
+  /// only carries the raw row, each insert is matched against the cached
+  /// conversations; unknown conversations are ignored (a later [load] will pick
+  /// up a brand-new thread). Safe to call repeatedly.
+  void _subscribe(String myId) {
+    if (_channel != null) return;
+    final channel = supabase.channel('messages:$myId');
+    channel
+        .onPostgresChanges(
+          event: PostgresChangeEvent.insert,
+          schema: 'public',
+          table: 'messages',
+          callback: (payload) => _onMessageInsert(payload, myId),
+        )
+        .subscribe();
+    _channel = channel;
+  }
+
+  void _onMessageInsert(PostgresChangePayload payload, String myId) {
+    try {
+      final row = payload.newRecord;
+      final convId = row['conversation_id']?.toString() ?? '';
+      if (convId.isEmpty) return;
+      final i = _indexOf(convId);
+      // Not one of my cached conversations: a periodic/next load() reconciles
+      // (e.g. someone just opened a brand-new thread with me).
+      if (i < 0) return;
+
+      final message = _messageFromRow(row, myId);
+      final current = _conversations[i];
+
+      // De-duplicate against the optimistic append from sendMessage.
+      final alreadyThere = current.messages.any((m) => m.id == message.id);
+      final messages = alreadyThere
+          ? current.messages
+          : <Message>[...current.messages, message];
+
+      // Only bump unread for inbound messages that are not for the open thread.
+      final isInbound = !message.fromMe;
+      final countsAsUnread =
+          isInbound && convId != _activeConversationId && !alreadyThere;
+
+      _conversations[i] = current.copyWith(
+        messages: messages,
+        lastPreview: message.text,
+        updatedAt: message.sentAt,
+        unread: countsAsUnread ? current.unread + 1 : current.unread,
+      );
+      notifyListeners();
+    } catch (_) {
+      // Best-effort; a later load() reconciles state.
     }
   }
 
@@ -277,12 +351,29 @@ class MessageRepository extends ChangeNotifier {
     }
   }
 
-  /// Clears cached state (e.g. on sign-out).
+  /// Clears cached state (e.g. on sign-out) and tears down the realtime
+  /// subscription so a signed-out user receives no further callbacks.
   void clear() {
+    _teardownChannel();
+    _activeConversationId = null;
     _conversations.clear();
     _status = LoadStatus.idle;
     _error = null;
     notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _teardownChannel();
+    super.dispose();
+  }
+
+  void _teardownChannel() {
+    final channel = _channel;
+    if (channel == null) return;
+    _channel = null;
+    // ignore: discarded_futures
+    supabase.removeChannel(channel);
   }
 
   // -- Helpers -------------------------------------------------------------

@@ -293,6 +293,28 @@ class PostRepository extends ChangeNotifier {
     return i < 0 ? null : _posts[i];
   }
 
+  /// Fetches a single post by [id] (joining the author profile), preferring
+  /// the in-memory cache when present so engagement flags stay consistent.
+  /// Used to open a post detail from a notification whose post may not be in
+  /// the feed cache. Returns null when missing or on failure.
+  Future<Post?> fetchPostById(String id) async {
+    final cached = postById(id);
+    if (cached != null) return cached;
+    try {
+      final row = await supabase
+          .from('posts')
+          .select('*, profiles(*)')
+          .eq('id', id)
+          .maybeSingle();
+      if (row == null) return null;
+      final posts = <Post>[_postFromRow(row)];
+      _applyEngagementFlags(posts);
+      return posts.first;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Fetches the top-level posts authored by [ownerId] (newest first), joining
   /// the author profile. Used by the profile screen for any user. Returns an
   /// empty list on failure.

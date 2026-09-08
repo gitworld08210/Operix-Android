@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../data/auth_repository.dart';
+import '../data/message_repository.dart';
 import '../data/post_repository.dart';
 import '../data/profile_repository.dart';
 import '../models/post.dart';
@@ -13,6 +14,7 @@ import '../widgets/avatar.dart';
 import '../widgets/post_card.dart';
 import '../widgets/verified_badge.dart';
 import 'bookmarks_screen.dart';
+import 'conversation_screen.dart';
 import 'post_detail_screen.dart';
 
 /// Profile screen with a banner, overlapping avatar, bio + counts, and
@@ -278,7 +280,14 @@ class _ProfileHeader extends StatelessWidget {
                   padding: const EdgeInsets.only(bottom: 4),
                   child: isCurrentUser
                       ? _EditButton(onEdit: onEdit)
-                      : _FollowButton(targetId: profile.id),
+                      : Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: <Widget>[
+                            _MessageButton(targetId: profile.id),
+                            const SizedBox(width: AppSpacing.sm),
+                            _FollowButton(targetId: profile.id),
+                          ],
+                        ),
                 ),
               ],
             ),
@@ -348,6 +357,67 @@ class _EditButton extends StatelessWidget {
         shape: const StadiumBorder(),
       ),
       child: const Text('Edit profile'),
+    );
+  }
+}
+
+/// Opens (or creates) a 1:1 conversation with [targetId] and navigates to it.
+/// Shown only on other users' profiles so DMs are fully user-initiated.
+class _MessageButton extends StatefulWidget {
+  const _MessageButton({required this.targetId});
+
+  final String targetId;
+
+  @override
+  State<_MessageButton> createState() => _MessageButtonState();
+}
+
+class _MessageButtonState extends State<_MessageButton> {
+  bool _busy = false;
+
+  Future<void> _openConversation() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    final navigator = Navigator.of(context);
+    final messenger = ScaffoldMessenger.of(context);
+    final conversationId = await MessageRepository.instance
+        .openOrCreateConversationWith(widget.targetId);
+    if (!mounted) return;
+    setState(() => _busy = false);
+    if (conversationId == null) {
+      messenger
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(content: Text('Could not open a conversation.')),
+        );
+      return;
+    }
+    await navigator.push(
+      MaterialPageRoute<void>(
+        builder: (_) => ConversationScreen(conversationId: conversationId),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return OutlinedButton(
+      onPressed: _busy ? null : _openConversation,
+      style: OutlinedButton.styleFrom(
+        foregroundColor: AppColors.primaryText,
+        side: const BorderSide(color: AppColors.border),
+        shape: const StadiumBorder(),
+      ),
+      child: _busy
+          ? const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: AppColors.accent,
+              ),
+            )
+          : const Text('Message'),
     );
   }
 }

@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../models/notification_item.dart';
 import '../models/user_profile.dart';
@@ -22,6 +23,11 @@ class NotificationRepository extends ChangeNotifier {
   final List<NotificationItem> _notifications = <NotificationItem>[];
   LoadStatus _status = LoadStatus.idle;
   Object? _error;
+
+  /// Live subscription to `notifications` inserts for the current recipient.
+  /// Created in [load] and torn down in [clear]/[dispose] so a signed-out user
+  /// never receives stale callbacks.
+  RealtimeChannel? _channel;
 
   /// The current load state of [notifications].
   LoadStatus get status => _status;
@@ -65,10 +71,57 @@ class NotificationRepository extends ChangeNotifier {
         ..addAll(data.map(_notificationFromRow));
       _status = LoadStatus.loaded;
       notifyListeners();
+      _subscribe(myId);
     } catch (e) {
       _error = e;
       _status = LoadStatus.error;
       notifyListeners();
+    }
+  }
+
+  /// Subscribes (once) to realtime inserts on `notifications` for [recipient].
+  /// A new row only carries foreign keys, so the actor profile is fetched
+  /// before the item is inserted into the cache and listeners are notified.
+  /// Safe to call repeatedly: an existing channel is reused.
+  void _subscribe(String recipient) {
+    if (_channel != null) return;
+    final channel = supabase.channel('notifications:$recipient');
+    channel
+        .onPostgresChanges(
+          event: PostgresChangeEvent.insert,
+          schema: 'public',
+          table: 'notifications',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'recipient',
+            value: recipient,
+          ),
+          callback: _onInsert,
+        )
+        .subscribe();
+    _channel = channel;
+  }
+
+  Future<void> _onInsert(PostgresChangePayload payload) async {
+    try {
+      final id = payload.newRecord['id']?.toString();
+      if (id == null || id.isEmpty) return;
+      // Ignore duplicates (e.g. an item already loaded or self-inserted).
+      if (_notifications.any((n) => n.id == id)) return;
+      // The realtime payload lacks the embedded actor profile, so hydrate the
+      // full joined row for this id.
+      final row = await supabase
+          .from('notifications')
+          .select('*, actor:profiles!notifications_actor_profile_fkey(*)')
+          .eq('id', id)
+          .maybeSingle();
+      if (row == null) return;
+      final item = _notificationFromRow(row);
+      if (_notifications.any((n) => n.id == item.id)) return;
+      _notifications.insert(0, item);
+      notifyListeners();
+    } catch (_) {
+      // Realtime hydration is best-effort; a later load() reconciles state.
     }
   }
 
@@ -129,12 +182,30 @@ class NotificationRepository extends ChangeNotifier {
   }
 
   /// Clears all cached state (e.g. on sign-out) so a subsequent login does not
-  /// show the previous user's notifications.
+  /// show the previous user's notifications. Also tears down the realtime
+  /// subscription so a signed-out user receives no further callbacks.
   void clear() {
+    _teardownChannel();
     _notifications.clear();
     _status = LoadStatus.idle;
     _error = null;
     notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _teardownChannel();
+    super.dispose();
+  }
+
+  void _teardownChannel() {
+    final channel = _channel;
+    if (channel == null) return;
+    _channel = null;
+    // Remove the channel from the client; unawaited on purpose (fire-and-forget
+    // teardown), guarded so a failure never surfaces.
+    // ignore: discarded_futures
+    supabase.removeChannel(channel);
   }
 
   // -- Mapping -------------------------------------------------------------
@@ -145,6 +216,7 @@ class NotificationRepository extends ChangeNotifier {
       type: _typeFromName(row['type'] as String?),
       actor: _actorFromRow(row['actor']),
       preview: row['preview'] as String?,
+      postId: row['post_id']?.toString(),
       createdAt: _parseDate(row['created_at']),
       read: (row['read'] as bool?) ?? false,
     );
