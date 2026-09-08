@@ -6,6 +6,7 @@ import '../models/user_profile.dart';
 import '../supabase_config.dart';
 import '../utils/ids.dart';
 import 'load_status.dart';
+import 'mappers.dart' as mappers;
 import 'notification_repository.dart';
 
 /// The post store for the app, fully backed by Supabase (no mock fallback).
@@ -553,65 +554,13 @@ class PostRepository extends ChangeNotifier {
         .toSet();
   }
 
-  // -- Mapping -------------------------------------------------------------
+  // -- Mapping (delegates to the pure helpers in mappers.dart) -------------
 
-  Post _postFromRow(Map<String, dynamic> row) =>
-      _postFromRowWithAuthor(row, _authorFromRow(row['profiles']));
+  Post _postFromRow(Map<String, dynamic> row) => mappers.postFromRow(row);
 
-  Post _postFromRowWithAuthor(Map<String, dynamic> row, UserProfile author) {
-    return Post(
-      id: row['id']?.toString() ?? '',
-      author: author,
-      content: (row['content'] as String?) ?? '',
-      mediaUrl: row['media_url'] as String?,
-      mediaType: _mediaTypeFromName(row['media_type'] as String?),
-      createdAt: _parseDate(row['created_at']),
-      replyCount: _asInt(row['reply_count']),
-      repostCount: _asInt(row['repost_count']),
-      likeCount: _asInt(row['like_count']),
-      viewCount: _asInt(row['view_count']),
-    );
-  }
+  Post _postFromRowWithAuthor(Map<String, dynamic> row, UserProfile author) =>
+      mappers.postFromRowWithAuthor(row, author);
 
-  UserProfile _authorFromRow(Object? profiles) {
-    if (profiles is Map) {
-      final p = profiles.cast<String, dynamic>();
-      final username = (p['username'] as String?) ?? 'user';
-      return UserProfile(
-        id: p['id']?.toString() ?? '',
-        username: username,
-        displayName: (p['display_name'] as String?) ?? username,
-        bio: (p['bio'] as String?) ?? '',
-        avatarUrl: p['avatar_url'] as String?,
-        bannerUrl: p['banner_url'] as String?,
-        verified: (p['verified'] as bool?) ?? false,
-        verificationKind: (p['verification_kind'] as String?) ?? 'verified',
-        followers: _asInt(p['followers']),
-        following: _asInt(p['following']),
-      );
-    }
-    return const UserProfile(id: '', username: 'user', displayName: 'User');
-  }
-
-  static MediaType _mediaTypeFromName(String? name) {
-    switch (name) {
-      case 'image':
-        return MediaType.image;
-      case 'video':
-        return MediaType.video;
-      default:
-        return MediaType.none;
-    }
-  }
-
-  static int _asInt(Object? value) {
-    if (value is int) return value;
-    if (value is num) return value.toInt();
-    return int.tryParse(value?.toString() ?? '') ?? 0;
-  }
-
-  static DateTime _parseDate(Object? value) {
-    if (value is DateTime) return value;
-    return DateTime.tryParse(value?.toString() ?? '') ?? DateTime.now();
-  }
+  UserProfile _authorFromRow(Object? profiles) =>
+      mappers.profileFromRow(profiles);
 }

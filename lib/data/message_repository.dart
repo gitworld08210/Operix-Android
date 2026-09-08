@@ -5,6 +5,7 @@ import '../models/conversation.dart';
 import '../models/user_profile.dart';
 import '../supabase_config.dart';
 import 'load_status.dart';
+import 'mappers.dart' as mappers;
 
 /// Store for the current user's direct-message threads, backed by the Supabase
 /// `conversations`, `conversation_participants`, and `messages` tables.
@@ -119,7 +120,7 @@ class MessageRepository extends ChangeNotifier {
       for (final row in others) {
         final convId = row['conversation_id']?.toString() ?? '';
         if (convId.isEmpty || participantByConv.containsKey(convId)) continue;
-        participantByConv[convId] = _profileFromRow(row['profiles']);
+        participantByConv[convId] = mappers.profileFromRow(row['profiles']);
       }
 
       final mapped = <Conversation>[];
@@ -136,8 +137,8 @@ class MessageRepository extends ChangeNotifier {
                 const UserProfile(id: '', username: 'user', displayName: 'User'),
             messages: const <Message>[],
             lastPreview: (convMap['last_preview'] as String?) ?? '',
-            updatedAt: _parseDate(convMap['updated_at']),
-            unread: _asInt(row['unread']),
+            updatedAt: mappers.parseDate(convMap['updated_at']),
+            unread: mappers.asInt(row['unread']),
           ),
         );
       }
@@ -381,43 +382,6 @@ class MessageRepository extends ChangeNotifier {
   int _indexOf(String conversationId) =>
       _conversations.indexWhere((c) => c.id == conversationId);
 
-  Message _messageFromRow(Map<String, dynamic> row, String? myId) {
-    return Message(
-      id: row['id']?.toString() ?? '',
-      fromMe: myId != null && row['sender']?.toString() == myId,
-      text: (row['text'] as String?) ?? '',
-      sentAt: _parseDate(row['sent_at']),
-    );
-  }
-
-  UserProfile _profileFromRow(Object? profile) {
-    if (profile is Map) {
-      final p = profile.cast<String, dynamic>();
-      final username = (p['username'] as String?) ?? 'user';
-      return UserProfile(
-        id: p['id']?.toString() ?? '',
-        username: username,
-        displayName: (p['display_name'] as String?) ?? username,
-        bio: (p['bio'] as String?) ?? '',
-        avatarUrl: p['avatar_url'] as String?,
-        bannerUrl: p['banner_url'] as String?,
-        verified: (p['verified'] as bool?) ?? false,
-        verificationKind: (p['verification_kind'] as String?) ?? 'verified',
-        followers: _asInt(p['followers']),
-        following: _asInt(p['following']),
-      );
-    }
-    return const UserProfile(id: '', username: 'user', displayName: 'User');
-  }
-
-  static int _asInt(Object? value) {
-    if (value is int) return value;
-    if (value is num) return value.toInt();
-    return int.tryParse(value?.toString() ?? '') ?? 0;
-  }
-
-  static DateTime _parseDate(Object? value) {
-    if (value is DateTime) return value;
-    return DateTime.tryParse(value?.toString() ?? '') ?? DateTime.now();
-  }
+  Message _messageFromRow(Map<String, dynamic> row, String? myId) =>
+      mappers.messageFromRow(row, myId);
 }

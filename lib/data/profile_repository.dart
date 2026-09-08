@@ -4,6 +4,7 @@ import '../models/notification_item.dart';
 import '../models/user_profile.dart';
 import '../supabase_config.dart';
 import 'load_status.dart';
+import 'mappers.dart' as mappers;
 import 'notification_repository.dart';
 
 /// Store for the current user and the profiles known to the app, fully backed
@@ -253,27 +254,8 @@ class ProfileRepository extends ChangeNotifier {
     notifyListeners();
   }
 
-  // -- Mapping -------------------------------------------------------------
+  // -- Mapping (delegates to the pure helpers in mappers.dart) -------------
 
-  UserProfile _profileFromRow(Map<String, dynamic> row) {
-    final username = (row['username'] as String?) ?? 'user';
-    return UserProfile(
-      id: row['id']?.toString() ?? '',
-      username: username,
-      displayName: (row['display_name'] as String?) ?? username,
-      bio: (row['bio'] as String?) ?? '',
-      avatarUrl: row['avatar_url'] as String?,
-      bannerUrl: row['banner_url'] as String?,
-      verified: (row['verified'] as bool?) ?? false,
-      verificationKind: (row['verification_kind'] as String?) ?? 'verified',
-      followers: _asInt(row['followers']),
-      following: _asInt(row['following']),
-    );
-  }
-
-  static int _asInt(Object? value) {
-    if (value is int) return value;
-    if (value is num) return value.toInt();
-    return int.tryParse(value?.toString() ?? '') ?? 0;
-  }
+  UserProfile _profileFromRow(Map<String, dynamic> row) =>
+      mappers.profileFromRow(row);
 }

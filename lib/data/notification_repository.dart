@@ -2,9 +2,9 @@ import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../models/notification_item.dart';
-import '../models/user_profile.dart';
 import '../supabase_config.dart';
 import 'load_status.dart';
+import 'mappers.dart' as mappers;
 
 /// Store for the current user's activity notifications, backed by the Supabase
 /// `notifications` table (joined to the actor's profile).
@@ -208,65 +208,8 @@ class NotificationRepository extends ChangeNotifier {
     supabase.removeChannel(channel);
   }
 
-  // -- Mapping -------------------------------------------------------------
+  // -- Mapping (delegates to the pure helpers in mappers.dart) -------------
 
-  NotificationItem _notificationFromRow(Map<String, dynamic> row) {
-    return NotificationItem(
-      id: row['id']?.toString() ?? '',
-      type: _typeFromName(row['type'] as String?),
-      actor: _actorFromRow(row['actor']),
-      preview: row['preview'] as String?,
-      postId: row['post_id']?.toString(),
-      createdAt: _parseDate(row['created_at']),
-      read: (row['read'] as bool?) ?? false,
-    );
-  }
-
-  UserProfile _actorFromRow(Object? actor) {
-    if (actor is Map) {
-      final p = actor.cast<String, dynamic>();
-      final username = (p['username'] as String?) ?? 'user';
-      return UserProfile(
-        id: p['id']?.toString() ?? '',
-        username: username,
-        displayName: (p['display_name'] as String?) ?? username,
-        bio: (p['bio'] as String?) ?? '',
-        avatarUrl: p['avatar_url'] as String?,
-        bannerUrl: p['banner_url'] as String?,
-        verified: (p['verified'] as bool?) ?? false,
-        verificationKind: (p['verification_kind'] as String?) ?? 'verified',
-        followers: _asInt(p['followers']),
-        following: _asInt(p['following']),
-      );
-    }
-    return const UserProfile(id: '', username: 'user', displayName: 'User');
-  }
-
-  static NotificationType _typeFromName(String? name) {
-    switch (name) {
-      case 'like':
-        return NotificationType.like;
-      case 'reply':
-        return NotificationType.reply;
-      case 'repost':
-        return NotificationType.repost;
-      case 'follow':
-        return NotificationType.follow;
-      case 'mention':
-        return NotificationType.mention;
-      default:
-        return NotificationType.like;
-    }
-  }
-
-  static int _asInt(Object? value) {
-    if (value is int) return value;
-    if (value is num) return value.toInt();
-    return int.tryParse(value?.toString() ?? '') ?? 0;
-  }
-
-  static DateTime _parseDate(Object? value) {
-    if (value is DateTime) return value;
-    return DateTime.tryParse(value?.toString() ?? '') ?? DateTime.now();
-  }
+  NotificationItem _notificationFromRow(Map<String, dynamic> row) =>
+      mappers.notificationFromRow(row);
 }

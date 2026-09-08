@@ -8,11 +8,11 @@ Oneleven is dark-first: true-black background, X-blue accent (`#1D9BF0`), clean 
 
 > **Not compiled in this environment.** This project was authored **by hand without an available Flutter/Dart/Android toolchain and with no network access**, so it has **not** been compiled, analyzed, or run in-sandbox. A developer must run `flutter pub get` and `flutter run` on a Flutter-equipped machine to build, verify, and launch it. Every file was written and cross-checked manually; treat the first real `flutter analyze` as the source of truth.
 
-The app is feature-complete for a first pass across three increments:
+The app is a fully Supabase-backed social app. It was built across an initial UI/backend pass and then a de-mock rebuild that removed the last of the in-memory sample data:
 
-- **FEAT-001 (foundation):** standard Flutter project files, a complete `android/` Gradle scaffold (namespace / applicationId `com.oneleven.app`, label "Oneleven"), the centralized theme (`lib/theme/`), the data models (`lib/models/`), and in-memory mock repositories with sample data (`lib/data/`).
-- **FEAT-002 (UI):** `lib/main.dart`, reusable widgets (`lib/widgets/`), and all screens (`lib/screens/`) wired to the repositories, plus the Supabase email-OTP auth screen (`lib/screens/auth_screen.dart`) and auth gate.
-- **FEAT-003 (Supabase backend):** `lib/supabase_config.dart`, `lib/data/auth_repository.dart`, `lib/data/storage_service.dart`, the `supabase/migrations/` schema, and the fully Supabase-backed repositories (`PostRepository`, `ProfileRepository`, `NotificationRepository`, `MessageRepository`) with explicit load-state and no mock fallback. See **Backend (Supabase)** below.
+- **UI + backend foundation:** standard Flutter project files, a complete `android/` Gradle scaffold (namespace / applicationId `com.oneleven.app`, label "Oneleven"), the centralized theme (`lib/theme/`), the data models (`lib/models/`), `lib/main.dart`, reusable widgets (`lib/widgets/`), all screens (`lib/screens/`), the Supabase email-OTP auth screen + auth gate, `lib/supabase_config.dart`, `lib/data/auth_repository.dart`, `lib/data/storage_service.dart`, and the `supabase/migrations/` schema.
+- **Data-layer de-mock:** `lib/data/mock_data.dart` was **deleted**. Every repository (`PostRepository`, `ProfileRepository`, `NotificationRepository`, `MessageRepository`) is now 100% Supabase-backed with explicit load-state (`lib/data/load_status.dart`) and **no mock fallback**. Row -> model parsing lives in pure helpers (`lib/data/mappers.dart`) so it is unit-testable without a client.
+- **Content + notifications + DMs:** post detail with threaded replies, a real bookmarks screen, real follow/unfollow, DB-backed search RPCs, start-a-DM from a profile, real notifications, and Supabase Realtime on posts/messages/notifications/conversations. See **Backend (Supabase)** below.
 
 ## Folder structure
 
@@ -23,28 +23,31 @@ oneleven_app/
     main.dart                  # App entry; MaterialApp + dark theme + home shell
     theme/                     # app_colors, app_text_styles, app_theme (+ spacing/radii)
     models/                    # post, user_profile, notification_item, conversation
-    data/                      # post/profile/notification/message/auth repositories (ChangeNotifier singletons), load_status, storage_service
+    data/                      # post/profile/notification/message/auth repositories (ChangeNotifier singletons),
+                               #   load_status, mappers (pure row->model helpers), storage_service
     supabase_config.dart       # Supabase URL/anon-key + initSupabase()
-    utils/                     # format.dart (fmtCount, timeAgo)
+    utils/                     # format.dart (fmtCount, timeAgo), ids.dart (client UUIDs)
     widgets/                   # avatar, verified_badge, action_button, post_card, app_scaffold
     screens/                   # home_feed, search, compose, notifications, messages,
-                               #   conversation, profile
+                               #   conversation, profile, post_detail, bookmarks
 ```
 
 ## Implemented vs scaffold
 
-**Implemented (functional against mock data):**
+**Implemented (functional against live Supabase data):**
 
-- Bottom navigation shell with 5 destinations: Home, Search, Compose, Notifications, Messages. Compose opens a full-screen modal route; Profile is reachable from the Home top-bar avatar.
-- **Home feed** with **For You / Following** tabs, listing `PostCard`s from `PostRepository`. Like / Repost / Bookmark toggle live counts and filled icons through the repository.
-- **PostCard** mirroring the web design: avatar + content columns, bold display name + verification badge + `@handle` + relative time + more menu, `#hashtag` / `@mention` linkification in X-blue, "Show more" truncation, optional rounded media (image, or a play-icon placeholder for video), and the full action row (Reply, Repost, Like, Views, Bookmark, Share). All `Image.network` calls have loading + error fallbacks so a blocked network never crashes the app.
-- **Search / Explore:** search field, trending chips, and a "Trends for you" list.
-- **Compose:** author avatar, multiline field, mock media/GIF/poll toolbar, character counter, and a Post button that adds to the feed.
-- **Notifications:** typed activity rows (like / reply / repost / follow / mention) with unread highlighting and "Mark all read".
-- **Messages + Conversation:** thread list with unread dots, and a chat view with left/right bubbles and a local send composer.
-- **Profile:** banner, overlapping avatar, name + badge, bio, follower/following counts, Edit/Follow button, and Posts / Media tabs.
+- Bottom navigation shell with 5 destinations: Home, Search, Compose, Notifications, Messages. Compose opens a full-screen modal route; Profile is reachable from the Home top-bar avatar. Unread badges on Notifications / Messages reflect the real `NotificationRepository.unreadNotifications` and `MessageRepository.unreadMessages`.
+- **Home feed** with **For You / Following** tabs, listing `PostCard`s from `PostRepository`. Each tab renders real **loading / empty / error (+ Retry)** states off `repo.status` and supports pull-to-refresh. Like / Repost / Bookmark write to their join tables and reflect the DB-owned counts. **Following** filters to authors the signed-in user actually follows.
+- **PostCard** mirroring the web design: avatar + content columns, bold display name + verification badge + `@handle` + relative time + more menu, `#hashtag` / `@mention` linkification in X-blue, "Show more" truncation, optional rounded media (image, or a play-icon placeholder for video), and the full action row (Reply, Repost, Like, Views, Bookmark, Share). Tapping a post opens the **post detail**; tapping an author opens their real profile. All `Image.network` calls have loading + error fallbacks so a blocked network never crashes the app.
+- **Post detail + replies** (`post_detail_screen.dart`): the parent post plus its threaded replies (`PostRepository.replies`) with loading/empty/error, and a reply composer that inserts a real reply (`addReply`, sets `parent_id`); the parent `reply_count` follows the DB trigger. **Share** copies a post link to the clipboard (pure Flutter SDK, no share package).
+- **Search / Explore:** a debounced field backed by the DB. People come from the `search_profiles` RPC and posts from the `search_posts` RPC; results navigate to real profiles / post detail. The idle state shows suggested people to follow. Real loading / no-results / error states. **No fabricated trends.**
+- **Compose:** author avatar, multiline field, a single media button documented as the byte-source seam, character counter, and a Post button that inserts a real `posts` row and then reloads the feed so DB defaults/counters are authoritative.
+- **Notifications:** typed activity rows (like / reply / repost / follow / mention) from the `notifications` table with unread highlighting, real "Mark all read" (a DB update), tap-to-navigate to the target post/profile, and live realtime inserts.
+- **Messages + Conversation:** the thread list and chat view read/write the `conversations` / `conversation_participants` / `messages` tables. Sending inserts a real message row (preview/updated_at/unread are trigger-maintained); bubble side derives from `Message.fromMe`; a **Message** button on other users' profiles starts a new DM. Realtime keeps threads and unread badges live.
+- **Bookmarks** (`bookmarks_screen.dart`): the signed-in user's bookmarked posts, reachable from their profile.
+- **Profile:** Supabase-backed for **any** user: banner, overlapping avatar, name + badge, bio, follower/following counts, a real Follow/Following button (`toggleFollow`) for other users or Edit profile (name/bio persist) for the current user, and Posts / Media tabs reading that profile's real posts.
 
-**Out of scope for this Android app (not built):** Wallet, Premium, Verification purchase flow, Creator Hub, and Live. Media attachment, replies, and share are intentionally mocked (they surface a snackbar).
+**Out of scope for this Android app (not built):** Wallet, Premium, Verification purchase flow, Creator Hub, and Live. The **only** remaining scaffold is the raw media byte source (gallery/camera picker); see [Media upload note](#media-upload-note). There are no mock placeholders and no "not available in this demo" snackbars for the core feed / reply / share / follow / search / DM actions.
 
 ## Web-only surfaces (excluded from Android)
 
@@ -271,31 +274,42 @@ must stay `EXECUTE`-able by `authenticated` because it is used inside RLS
 policies), and `unused_index` INFO notices (expected while the tables are still
 empty; the indexes back queries the app issues at runtime).
 
-**Unit tests** exercise the offline-safe surface of the repositories (initial
-`idle` / empty state, unknown-id toggles returning null, and `clear()`); the
-Supabase-dependent paths are verified manually / via the MCP tooling because
-the tests never boot a Supabase client.
+**Unit tests** were rewritten for the no-mock architecture. The old tests
+depended on the deleted `MockData` seed; they now exercise the offline-safe
+surface of the repositories (initial `idle` / empty state, unknown-id toggles
+returning null, `clear()`) plus the pure row -> model mapping in
+`lib/data/mappers.dart` (see the **Tests** section). The Supabase-dependent
+paths (`load`, `replies`, DM send, notifications) are verified manually / via
+the MCP tooling because the tests never boot a Supabase client.
 
 ### Media upload note
 
-To keep the dependency surface minimal, **no image/file-picker package is
-bundled**. `StorageService` provides the upload helpers, and there are clearly
-marked scaffold call sites (`compose_screen.dart` for reels,
-`profile_screen.dart` for avatars). The **only** missing piece is the raw byte
-source (gallery/camera). For reels the rest of the flow is real: once bytes are
-supplied, `_uploadReel` uploads to the `reels` bucket, inserts a row into the
-`reels` table (`StorageService.insertReel`), and surfaces the reel as a video
-post; no picker means it is not yet triggered from a button.
+**No image/file-picker package is bundled**, and one could not be added in the
+build environment: this app was assembled with **repository access only
+(INTEGRATIONS_ONLY)**, so `pub.dev` was unreachable and packages such as
+`image_picker` / `file_picker` could not be fetched. Media, avatar, and reel
+picking are therefore left as a clearly-defined **byte-source seam**:
+`StorageService` provides the upload helpers, and there are marked call sites
+(`compose_screen.dart` for reels/photos, `profile_screen.dart` for avatars).
+The **only** missing piece is the raw byte source (gallery/camera). For reels
+the rest of the flow is real: once bytes are supplied, `_uploadReel` uploads to
+the `reels` bucket, inserts a row into the `reels` table
+(`StorageService.insertReel`), and surfaces the reel as a video post; adding a
+picker on a networked machine is the single remaining wiring step.
 
 ## Tests
 
-Pure logic is covered by unit tests under `test/` (run with `flutter test`):
+Pure, network-independent logic is covered by unit tests under `test/` (run
+with `flutter test`). Because the repositories are now fully Supabase-backed
+with no mock fallback, the tests never boot a client; they target only pure /
+synchronous logic:
 
-- `test/format_test.dart` — `fmtCount` K/M/B thresholds and trailing-`.0` trimming; `timeAgo` buckets (`now` / `m` / `h` / `d` / short date).
-- `test/post_repository_test.dart` — `forYou` ordering, `following` filtering, `toggleLike` / `toggleRepost` / `toggleBookmark` flipping state and adjusting counts, and `addPost` prepending.
-- `test/profile_repository_test.dart` — notification/conversation ordering, unread counts, `markNotificationsRead`, and `updateProfile`.
+- `test/format_test.dart` — `fmtCount` K/M/B thresholds and trailing-`.0` trimming; `timeAgo` buckets (`now` / `m` / `h` / `d` / short date). Unchanged.
+- `test/mappers_test.dart` — the pure row -> model helpers in `lib/data/mappers.dart`: `asInt` / `parseDate` coercion, `mediaTypeFromName` / `notificationTypeFromName` enum mapping, `profileFromRow` (including the unknown-profile fallback), `postFromRow` (joined author + DB-owned counters, never deriving engagement flags), `notificationFromRow`, and `messageFromRow` **`fromMe` derivation** (sender vs current uid, including signed-out).
+- `test/post_repository_test.dart` — the offline-safe `PostRepository` surface: it starts `idle` with empty `forYou` / `following`, returns unmodifiable views, `toggleLike` / `toggleRepost` / `toggleBookmark` return null for an unknown id without touching the network, and `clear()` resets and notifies.
+- `test/profile_repository_test.dart` — the offline-safe `ProfileRepository` surface: `idle` with no `currentUser` / empty `profiles`, `isFollowing` false before loading, unmodifiable `profiles` view, and `clear()`.
 
-Like the rest of the project, these were authored by hand and have not been executed in-sandbox (no Dart toolchain); run `flutter test` on a Flutter-equipped machine.
+`MockData` was removed, so no test references `package:oneleven/data/mock_data.dart`. Like the rest of the project, these tests were authored by hand and have **not** been executed in-sandbox (no Dart toolchain); run `flutter test` on a Flutter-equipped machine, which is the source of truth.
 
 ## Dependencies
 
