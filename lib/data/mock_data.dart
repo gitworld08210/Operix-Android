@@ -2,6 +2,7 @@ import '../models/comment.dart';
 import '../models/conversation.dart';
 import '../models/notification_item.dart';
 import '../models/post.dart';
+import '../models/post_attachment.dart';
 import '../models/user_profile.dart';
 
 /// Static seed data used by the in-memory repositories. All image URLs point at
@@ -268,6 +269,47 @@ abstract final class MockData {
         repostCount: 4,
         likeCount: 210,
         viewCount: 9800,
+      ),
+      // p11: a MULTI-IMAGE CAROUSEL post exercising the polymorphic content
+      // model (kind is derived as PostKind.carousel from >1 attachment). Placed
+      // LAST with the OLDEST createdAt so the newest-first feed ordering and
+      // the existing p1..p10 order/count assertions in post_repository_test.dart
+      // are unaffected. `marco` (not aria/jules) keeps the Following tab subset
+      // unchanged. Attachments are carried BY URL (picsum placeholders) — real
+      // capture/upload is Phase 4 (see PostAttachment's PHASE 4 SEAM note). kind
+      // is derived automatically by the Post constructor via deriveKind.
+      Post(
+        id: 'p11',
+        author: marco,
+        content: 'A few frames from the harbor series. Swipe through. #photography',
+        attachments: const <PostAttachment>[
+          PostAttachment(
+            id: 'p11_a0',
+            postId: 'p11',
+            position: 0,
+            type: AttachmentType.image,
+            url: 'https://picsum.photos/seed/harbor1/900/600',
+          ),
+          PostAttachment(
+            id: 'p11_a1',
+            postId: 'p11',
+            position: 1,
+            type: AttachmentType.image,
+            url: 'https://picsum.photos/seed/harbor2/900/600',
+          ),
+          PostAttachment(
+            id: 'p11_a2',
+            postId: 'p11',
+            position: 2,
+            type: AttachmentType.image,
+            url: 'https://picsum.photos/seed/harbor3/900/600',
+          ),
+        ],
+        createdAt: now.subtract(const Duration(days: 1, hours: 6)),
+        replyCount: 9,
+        repostCount: 12,
+        likeCount: 430,
+        viewCount: 15600,
       ),
     ];
   }

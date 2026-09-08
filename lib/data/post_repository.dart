@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../models/post.dart';
+import '../models/post_attachment.dart';
 import '../models/user_profile.dart';
 import '../supabase_config.dart';
 import 'feed_page.dart';
@@ -94,7 +95,7 @@ class PostRepository extends ChangeNotifier {
     try {
       final rows = await supabase
           .from('posts')
-          .select('*, profiles(*)')
+          .select('*, profiles(*), post_attachments(*)')
           .order('created_at', ascending: false)
           .order('id', ascending: false)
           .limit(kFeedPageSize);
@@ -127,7 +128,7 @@ class PostRepository extends ChangeNotifier {
       final iso = cursor.createdAt.toUtc().toIso8601String();
       final rows = await supabase
           .from('posts')
-          .select('*, profiles(*)')
+          .select('*, profiles(*), post_attachments(*)')
           .or(
             'created_at.lt.$iso,'
             'and(created_at.eq.$iso,id.lt.${cursor.id})',
@@ -298,9 +299,33 @@ class PostRepository extends ChangeNotifier {
         'id': post.id,
         'owner': userId,
         'content': post.content,
+        // Legacy single-media columns are kept in sync via the compatibility
+        // shim (attachments.first) so pre-0005 readers still work; `kind` is
+        // the new polymorphic discriminator added by migration 0005.
         'media_url': post.mediaUrl,
         'media_type': post.mediaType.name,
+        'kind': post.kind.name,
       });
+      // Persist the ordered attachments into post_attachments (guarded,
+      // fire-and-forget). A text post has an empty list, so nothing is written.
+      // PHASE 4 SEAM: attachments are carried BY URL here; real byte
+      // capture/upload to the storage bucket lands in Phase 4.
+      if (post.attachments.isNotEmpty) {
+        await supabase.from('post_attachments').insert(<Map<String, dynamic>>[
+          for (final a in post.attachments)
+            <String, dynamic>{
+              'id': a.id,
+              'post_id': post.id,
+              'position': a.position,
+              'type': a.type.name,
+              'url': a.url,
+              'thumb_url': a.thumbUrl,
+              'width': a.width,
+              'height': a.height,
+              'alt_text': a.altText,
+            },
+        ]);
+      }
     } catch (_) {
       // Ignore persistence failures; the post is already shown locally.
     }
@@ -371,12 +396,17 @@ class PostRepository extends ChangeNotifier {
     Set<String> repostedIds = const <String>{},
   }) {
     final id = row['id']?.toString() ?? '';
+    final attachments = _attachmentsFromRow(id, row);
     return Post(
       id: id,
       author: _authorFromRow(row['profiles']),
       content: (row['content'] as String?) ?? '',
-      mediaUrl: row['media_url'] as String?,
-      mediaType: _mediaTypeFromName(row['media_type'] as String?),
+      // The ordered attachments drive the polymorphic `kind` (via deriveKind in
+      // the Post constructor). When the joined post_attachments array is
+      // present we map it; otherwise we fall back to the legacy single
+      // media_url/media_type slot so pre-0005 rows still map to a one-image or
+      // one-video post (or a text post when there is no media).
+      attachments: attachments,
       createdAt: _parseDate(row['created_at']),
       replyCount: _asInt(row['reply_count']),
       repostCount: _asInt(row['repost_count']),
@@ -384,6 +414,63 @@ class PostRepository extends ChangeNotifier {
       viewCount: _asInt(row['view_count']),
       liked: likedIds.contains(id),
       reposted: repostedIds.contains(id),
+    );
+  }
+
+  /// Maps a post's attachments from the joined `post_attachments` array when
+  /// present (ORDERED by `position`), falling back to the legacy
+  /// `media_url`/`media_type` single-attachment slot for pre-0005 rows.
+  ///
+  /// Returns an empty list for a text post (no attachments and no legacy
+  /// media), which [deriveKind] maps to [PostKind.text].
+  static List<PostAttachment> _attachmentsFromRow(
+    String postId,
+    Map<String, dynamic> row,
+  ) {
+    final raw = row['post_attachments'];
+    if (raw is List && raw.isNotEmpty) {
+      final list = raw
+          .whereType<Map<dynamic, dynamic>>()
+          .map((m) => _attachmentFromRow(postId, m.cast<String, dynamic>()))
+          .toList()
+        ..sort((a, b) => a.position.compareTo(b.position));
+      return list;
+    }
+    // Legacy fallback: build a single attachment from the old media columns.
+    final mediaUrl = row['media_url'] as String?;
+    final mediaType = _mediaTypeFromName(row['media_type'] as String?);
+    if (mediaUrl == null || mediaType == MediaType.none) {
+      return const <PostAttachment>[];
+    }
+    return <PostAttachment>[
+      PostAttachment(
+        id: '${postId}_a0',
+        postId: postId,
+        position: 0,
+        type: mediaType == MediaType.video
+            ? AttachmentType.video
+            : AttachmentType.image,
+        url: mediaUrl,
+      ),
+    ];
+  }
+
+  static PostAttachment _attachmentFromRow(
+    String postId,
+    Map<String, dynamic> m,
+  ) {
+    return PostAttachment(
+      id: m['id']?.toString() ?? '',
+      postId: m['post_id']?.toString() ?? postId,
+      position: _asInt(m['position']),
+      type: (m['type'] as String?) == 'video'
+          ? AttachmentType.video
+          : AttachmentType.image,
+      url: (m['url'] as String?) ?? '',
+      thumbUrl: m['thumb_url'] as String?,
+      width: m['width'] == null ? null : _asInt(m['width']),
+      height: m['height'] == null ? null : _asInt(m['height']),
+      altText: m['alt_text'] as String?,
     );
   }
 

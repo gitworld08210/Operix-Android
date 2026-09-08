@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../data/profile_repository.dart';
 import '../data/safety_repository.dart';
 import '../models/post.dart';
+import '../models/post_attachment.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
 import '../theme/app_theme.dart';
@@ -97,7 +98,14 @@ class _PostCardState extends State<PostCard> {
                   _caption(context),
                   if (post.hasMedia) ...<Widget>[
                     const SizedBox(height: AppSpacing.md),
-                    _Media(post: post),
+                    // Switch the media block on the polymorphic content kind:
+                    // a carousel (>1 attachment) renders a swipeable PageView;
+                    // single image/video keeps the existing single _Media.
+                    // Text posts never reach here (hasMedia is false).
+                    if (post.kind == PostKind.carousel)
+                      _Carousel(attachments: post.attachments)
+                    else
+                      _Media(post: post),
                   ],
                   const SizedBox(height: AppSpacing.sm),
                   _actions(),
@@ -349,6 +357,8 @@ class _PostOverflowMenu extends StatelessWidget {
   }
 }
 
+/// The single-media block (single image or single video). Reads the post's
+/// first attachment via the polymorphic model.
 class _Media extends StatelessWidget {
   const _Media({required this.post});
 
@@ -356,7 +366,49 @@ class _Media extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final url = post.mediaUrl!;
+    final attachment = post.attachments.first;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(AppRadii.md),
+      child: AspectRatio(
+        aspectRatio: 16 / 10,
+        child: _AttachmentImage(
+          url: attachment.url,
+          isVideo: attachment.type == AttachmentType.video,
+        ),
+      ),
+    );
+  }
+}
+
+/// A swipeable multi-image carousel for a [PostKind.carousel] post.
+///
+/// A horizontal [PageView] of the ordered attachments inside the SAME
+/// ClipRRect/AspectRatio frame as [_Media], with dot page-indicators and a
+/// '1/N' counter overlay. Each page uses the same Image.network
+/// loading/error fallbacks as the single-media path, and video attachments
+/// keep the play-button overlay.
+class _Carousel extends StatefulWidget {
+  const _Carousel({required this.attachments});
+
+  final List<PostAttachment> attachments;
+
+  @override
+  State<_Carousel> createState() => _CarouselState();
+}
+
+class _CarouselState extends State<_Carousel> {
+  final PageController _controller = PageController();
+  int _current = 0;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final items = widget.attachments;
     return ClipRRect(
       borderRadius: BorderRadius.circular(AppRadii.md),
       child: AspectRatio(
@@ -364,36 +416,113 @@ class _Media extends StatelessWidget {
         child: Stack(
           fit: StackFit.expand,
           children: <Widget>[
-            Image.network(
-              url,
-              fit: BoxFit.cover,
-              loadingBuilder: (context, child, progress) {
-                if (progress == null) return child;
-                return const _MediaFallback(loading: true);
+            PageView.builder(
+              controller: _controller,
+              itemCount: items.length,
+              onPageChanged: (i) => setState(() => _current = i),
+              itemBuilder: (context, i) {
+                final attachment = items[i];
+                return _AttachmentImage(
+                  url: attachment.url,
+                  isVideo: attachment.type == AttachmentType.video,
+                );
               },
-              errorBuilder: (context, error, stackTrace) =>
-                  const _MediaFallback(loading: false),
             ),
-            if (post.mediaType == MediaType.video)
-              const Center(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: Color(0x99000000),
-                    shape: BoxShape.circle,
+            // '1/N' counter overlay (top-right).
+            Positioned(
+              top: AppSpacing.sm,
+              right: AppSpacing.sm,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: const Color(0x99000000),
+                  borderRadius: BorderRadius.circular(AppRadii.sm),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 2,
                   ),
-                  child: Padding(
-                    padding: EdgeInsets.all(12),
-                    child: Icon(
-                      Icons.play_arrow,
+                  child: Text(
+                    '${_current + 1}/${items.length}',
+                    style: AppTextStyles.caption.copyWith(
                       color: AppColors.white,
-                      size: 32,
                     ),
                   ),
                 ),
               ),
+            ),
+            // Dot page-indicators (bottom-center).
+            Positioned(
+              bottom: AppSpacing.sm,
+              left: 0,
+              right: 0,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: <Widget>[
+                  for (var i = 0; i < items.length; i++)
+                    Container(
+                      width: 6,
+                      height: 6,
+                      margin: const EdgeInsets.symmetric(horizontal: 3),
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: i == _current
+                            ? AppColors.white
+                            : const Color(0x80FFFFFF),
+                      ),
+                    ),
+                ],
+              ),
+            ),
           ],
         ),
       ),
+    );
+  }
+}
+
+/// A single network image page shared by [_Media] and [_Carousel]: the same
+/// [Image.network] loading/error fallbacks, plus the video play-button overlay
+/// when [isVideo] is true.
+class _AttachmentImage extends StatelessWidget {
+  const _AttachmentImage({required this.url, required this.isVideo});
+
+  final String url;
+  final bool isVideo;
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      fit: StackFit.expand,
+      children: <Widget>[
+        Image.network(
+          url,
+          fit: BoxFit.cover,
+          loadingBuilder: (context, child, progress) {
+            if (progress == null) return child;
+            return const _MediaFallback(loading: true);
+          },
+          errorBuilder: (context, error, stackTrace) =>
+              const _MediaFallback(loading: false),
+        ),
+        if (isVideo)
+          const Center(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: Color(0x99000000),
+                shape: BoxShape.circle,
+              ),
+              child: Padding(
+                padding: EdgeInsets.all(12),
+                child: Icon(
+                  Icons.play_arrow,
+                  color: AppColors.white,
+                  size: 32,
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }

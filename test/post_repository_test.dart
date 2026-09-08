@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:oneleven/data/mock_data.dart';
 import 'package:oneleven/data/post_repository.dart';
 import 'package:oneleven/models/post.dart';
+import 'package:oneleven/models/post_attachment.dart';
 
 /// A representative `posts` row (with joined `profiles(*)`) as PostgREST would
 /// return it, used to exercise the row->model mapping directly.
@@ -227,6 +228,105 @@ void main() {
       );
       expect(post.liked, isFalse);
       expect(post.reposted, isFalse);
+    });
+  });
+
+  group('mapPostRow attachments (polymorphic content)', () {
+    Map<String, dynamic> attachment(String id, int position, String type) =>
+        <String, dynamic>{
+          'id': id,
+          'post_id': 'p1',
+          'position': position,
+          'type': type,
+          'url': 'https://example.com/$id.jpg',
+        };
+
+    test('maps a 3-attachment array into an ordered carousel post', () {
+      final row = _row('p1')
+        ..['post_attachments'] = <Map<String, dynamic>>[
+          // Deliberately out of order to prove the mapper sorts by position.
+          attachment('a2', 2, 'image'),
+          attachment('a0', 0, 'image'),
+          attachment('a1', 1, 'image'),
+        ];
+      final post = PostRepository.mapPostRow(row);
+      expect(post.kind, PostKind.carousel);
+      expect(post.attachments.length, 3);
+      expect(
+        post.attachments.map((a) => a.position).toList(),
+        <int>[0, 1, 2],
+      );
+      expect(post.attachments.map((a) => a.id).toList(), <String>['a0', 'a1', 'a2']);
+      // Legacy shim reflects the first attachment.
+      expect(post.mediaUrl, post.attachments.first.url);
+      expect(post.hasMedia, isTrue);
+    });
+
+    test('maps a single image attachment to kind=image', () {
+      final row = _row('p1')
+        ..['post_attachments'] = <Map<String, dynamic>>[
+          attachment('a0', 0, 'image'),
+        ];
+      final post = PostRepository.mapPostRow(row);
+      expect(post.kind, PostKind.image);
+      expect(post.attachments.length, 1);
+      expect(post.mediaType, MediaType.image);
+    });
+
+    test('maps a single video attachment to kind=video', () {
+      final row = _row('p1')
+        ..['post_attachments'] = <Map<String, dynamic>>[
+          attachment('a0', 0, 'video'),
+        ];
+      final post = PostRepository.mapPostRow(row);
+      expect(post.kind, PostKind.video);
+      expect(post.attachments.single.type, AttachmentType.video);
+      expect(post.mediaType, MediaType.video);
+    });
+
+    test('falls back to legacy media_url/media_type for a pre-0005 row', () {
+      final row = _row('p1')
+        ..['media_url'] = 'https://example.com/legacy.jpg'
+        ..['media_type'] = 'image';
+      // No post_attachments key present at all.
+      final post = PostRepository.mapPostRow(row);
+      expect(post.kind, PostKind.image);
+      expect(post.attachments.length, 1);
+      expect(post.attachments.first.url, 'https://example.com/legacy.jpg');
+      expect(post.mediaUrl, 'https://example.com/legacy.jpg');
+    });
+
+    test('falls back to a legacy video row via media_type=video', () {
+      final row = _row('p1')
+        ..['media_url'] = 'https://example.com/clip.mp4'
+        ..['media_type'] = 'video';
+      final post = PostRepository.mapPostRow(row);
+      expect(post.kind, PostKind.video);
+      expect(post.attachments.single.type, AttachmentType.video);
+    });
+
+    test('maps a row with no media to kind=text with empty attachments', () {
+      // The base _row has media_url=null, media_type='none', no attachments.
+      final post = PostRepository.mapPostRow(_row('p1'));
+      expect(post.kind, PostKind.text);
+      expect(post.attachments, isEmpty);
+      expect(post.hasMedia, isFalse);
+      expect(post.mediaUrl, isNull);
+      expect(post.mediaType, MediaType.none);
+    });
+
+    test('prefers the post_attachments array over legacy media columns', () {
+      final row = _row('p1')
+        ..['media_url'] = 'https://example.com/legacy.jpg'
+        ..['media_type'] = 'image'
+        ..['post_attachments'] = <Map<String, dynamic>>[
+          attachment('a0', 0, 'image'),
+          attachment('a1', 1, 'image'),
+        ];
+      final post = PostRepository.mapPostRow(row);
+      expect(post.kind, PostKind.carousel);
+      expect(post.attachments.length, 2);
+      expect(post.attachments.first.id, 'a0');
     });
   });
 }

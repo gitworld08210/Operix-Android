@@ -37,14 +37,45 @@ oneleven_app/
 
 - Bottom navigation shell with 5 destinations: Home, Search, Compose, Notifications, Messages. Compose opens a full-screen modal route; Profile is reachable from the Home top-bar avatar.
 - **Home feed** with **For You / Following** tabs, listing `PostCard`s from `PostRepository`. Like / Repost / Bookmark toggle live counts and filled icons through the repository.
-- **PostCard** mirroring the web design: avatar + content columns, bold display name + verification badge + `@handle` + relative time + more menu, `#hashtag` / `@mention` linkification in X-blue, "Show more" truncation, optional rounded media (image, or a play-icon placeholder for video), and the full action row (Reply, Repost, Like, Views, Bookmark, Share). All `Image.network` calls have loading + error fallbacks so a blocked network never crashes the app.
+- **PostCard** mirroring the web design: avatar + content columns, bold display name + verification badge + `@handle` + relative time + more menu, `#hashtag` / `@mention` linkification in X-blue, "Show more" truncation, optional rounded media (single image, a play-icon placeholder for video, or a swipeable multi-image **carousel** with dot indicators + a `1/N` counter — see **Content model** below), and the full action row (Reply, Repost, Like, Views, Bookmark, Share). All `Image.network` calls have loading + error fallbacks so a blocked network never crashes the app.
 - **Search / Explore:** search field, trending chips, and a "Trends for you" list.
-- **Compose:** author avatar, multiline field, mock media/GIF/poll toolbar, character counter, and a Post button that adds to the feed.
+- **Compose:** author avatar, multiline field, media/GIF/poll toolbar, character counter, and a Post button that adds to the feed. The **Photos** button appends demo URL-based image attachments (so a single-image post or a multi-image carousel can be assembled and previewed) — see the Phase 4 seam in **Content model**.
 - **Notifications:** typed activity rows (like / reply / repost / follow / mention) with unread highlighting and "Mark all read".
 - **Messages + Conversation:** thread list with unread dots, and a chat view with left/right bubbles and a local send composer.
 - **Profile:** banner, overlapping avatar, name + badge, bio, follower/following counts, Edit/Follow button, and Posts / Media tabs.
 
-**Out of scope for this Android app (not built):** Wallet, Premium, Verification purchase flow, Creator Hub, and Live. Media attachment, replies, and share are intentionally mocked (they surface a snackbar).
+**Out of scope for this Android app (not built):** Wallet, Premium, Verification purchase flow, Creator Hub, and Live. GIF/Poll and share are intentionally mocked (they surface a snackbar).
+
+## Content model (polymorphic posts)
+
+Post content is modeled **polymorphically** rather than as a single hardcoded
+media slot, so text, single-image, single-video, and multi-image **carousel**
+posts share one abstraction and new content kinds can be added without
+rewriting every consumer:
+
+- **`PostKind` discriminator** (`text` | `image` | `carousel` | `video`) on
+  `Post`, kept consistent with an **ordered `List<PostAttachment>` attachments**
+  relation via `deriveKind(attachments)` (0 attachments ⇒ `text`; 1 image ⇒
+  `image`; 1 video ⇒ `video`; more than 1 ⇒ `carousel`). The constructor and
+  `copyWith` always derive `kind` from the attachment list, so the two can
+  never disagree.
+- **Compatibility shim:** the legacy `mediaUrl` / `mediaType` / `hasMedia`
+  getters on `Post` are preserved and computed from `attachments.first`, so
+  single-media consumers behave identically.
+- **Backend:** migration `0005_content_attachments.sql` adds `posts.kind` and a
+  `post_attachments` table (indexed by `(post_id, position)`) whose SELECT RLS
+  **inherits the parent post's author visibility** (mirroring the
+  comments/reposts policies from `0002`). The client row-mapper reads the joined
+  `post_attachments` array (ordered by position) and **falls back** to the
+  legacy `media_url` / `media_type` columns for pre-`0005` rows.
+
+> **Phase 4 seam — no real capture/upload yet.** Attachments are carried **by
+> URL/reference** only. There is no device gallery/camera capture of bytes: the
+> mock seed and the compose **Photos** button use hosted picsum placeholder
+> URLs, and each URL is rendered with the existing `Image.network` +
+> loading/error placeholder pattern. Real capture + upload to the storage
+> bucket (populating the attachment URLs from device bytes) is Phase 4; the seam
+> is marked in code with `// PHASE 4 SEAM: ...`.
 
 ## Web-only surfaces (excluded from Android)
 
