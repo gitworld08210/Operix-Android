@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../data/auth_repository.dart';
 import '../data/post_repository.dart';
 import '../data/profile_repository.dart';
+import '../data/safety_repository.dart';
 import '../models/post.dart';
 import '../models/user_profile.dart';
 import '../theme/app_colors.dart';
@@ -11,6 +12,7 @@ import '../theme/app_theme.dart';
 import '../utils/format.dart';
 import '../widgets/avatar.dart';
 import '../widgets/post_card.dart';
+import '../widgets/report_sheet.dart';
 import '../widgets/verified_badge.dart';
 import 'edit_profile_screen.dart';
 import 'settings_screen.dart';
@@ -81,15 +83,65 @@ class _ProfileScreenState extends State<ProfileScreen>
     }
   }
 
+  void _snack(String message, {VoidCallback? undo}) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          backgroundColor: AppColors.surface,
+          behavior: SnackBarBehavior.floating,
+          action: undo == null
+              ? null
+              : SnackBarAction(
+                  label: 'Undo',
+                  textColor: AppColors.accent,
+                  onPressed: undo,
+                ),
+        ),
+      );
+  }
+
+  Future<void> _onSafetyAction(String value) async {
+    final safety = SafetyRepository.instance;
+    final profile = widget.profile;
+    switch (value) {
+      case 'mute':
+        safety.mute(profile.id);
+        _snack('Muted @${profile.username}', undo: () => safety.unmute(profile.id));
+      case 'unmute':
+        safety.unmute(profile.id);
+        _snack('Unmuted @${profile.username}');
+      case 'block':
+        safety.block(profile.id);
+        _snack('Blocked @${profile.username}', undo: () => safety.unblock(profile.id));
+      case 'unblock':
+        safety.unblock(profile.id);
+        _snack('Unblocked @${profile.username}');
+      case 'report':
+        await showReportSheet(
+          context,
+          targetType: 'profile',
+          targetId: profile.id,
+          targetLabel: '@${profile.username}',
+        );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final profile = widget.profile;
     return Scaffold(
       body: AnimatedBuilder(
-        animation: PostRepository.instance,
+        animation: Listenable.merge(<Listenable>[
+          PostRepository.instance,
+          SafetyRepository.instance,
+        ]),
         builder: (context, _) {
           final posts = _userPosts;
           final media = posts.where((p) => p.hasMedia).toList();
+          final isBlocked = SafetyRepository.instance.isBlocked(profile.id);
+          final isMuted = SafetyRepository.instance.isMuted(profile.id);
           return NestedScrollView(
             headerSliverBuilder: (context, _) => <Widget>[
               SliverAppBar(
@@ -107,7 +159,27 @@ class _ProfileScreenState extends State<ProfileScreen>
                       icon: const Icon(Icons.logout),
                       onPressed: _signOut,
                     ),
-                  ],
+                  ] else
+                    PopupMenuButton<String>(
+                      tooltip: 'More',
+                      icon: const Icon(Icons.more_horiz),
+                      color: AppColors.surface,
+                      onSelected: _onSafetyAction,
+                      itemBuilder: (context) => <PopupMenuEntry<String>>[
+                        PopupMenuItem<String>(
+                          value: isMuted ? 'unmute' : 'mute',
+                          child: Text(isMuted ? 'Unmute' : 'Mute'),
+                        ),
+                        PopupMenuItem<String>(
+                          value: isBlocked ? 'unblock' : 'block',
+                          child: Text(isBlocked ? 'Unblock' : 'Block'),
+                        ),
+                        const PopupMenuItem<String>(
+                          value: 'report',
+                          child: Text('Report'),
+                        ),
+                      ],
+                    ),
                 ],
                 expandedHeight: 140,
                 flexibleSpace: FlexibleSpaceBar(
@@ -118,6 +190,7 @@ class _ProfileScreenState extends State<ProfileScreen>
                 child: _ProfileHeader(
                   profile: profile,
                   isCurrentUser: _isCurrentUser,
+                  isBlocked: isBlocked,
                   onEditProfile: _openEditProfile,
                 ),
               ),
@@ -181,11 +254,13 @@ class _ProfileHeader extends StatelessWidget {
   const _ProfileHeader({
     required this.profile,
     required this.isCurrentUser,
+    required this.isBlocked,
     required this.onEditProfile,
   });
 
   final UserProfile profile;
   final bool isCurrentUser;
+  final bool isBlocked;
   final VoidCallback onEditProfile;
 
   @override
@@ -229,7 +304,11 @@ class _ProfileHeader extends StatelessWidget {
                       side: const BorderSide(color: AppColors.border),
                       shape: const StadiumBorder(),
                     ),
-                    child: Text(isCurrentUser ? 'Edit profile' : 'Follow'),
+                    child: Text(
+                      isCurrentUser
+                          ? 'Edit profile'
+                          : (isBlocked ? 'Blocked' : 'Follow'),
+                    ),
                   ),
                 ),
               ],
@@ -269,6 +348,22 @@ class _ProfileHeader extends StatelessWidget {
                     _Count(value: profile.followers, label: 'Followers'),
                   ],
                 ),
+                if (isBlocked) ...<Widget>[
+                  const SizedBox(height: AppSpacing.md),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(AppSpacing.md),
+                    decoration: BoxDecoration(
+                      color: AppColors.surface,
+                      borderRadius: BorderRadius.circular(AppRadii.md),
+                    ),
+                    child: Text(
+                      'You have blocked this account. Their posts are hidden '
+                      'from your feed.',
+                      style: AppTextStyles.caption,
+                    ),
+                  ),
+                ],
               ],
             ),
           ),

@@ -5,15 +5,17 @@ import '../data/profile_repository.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
 import '../theme/app_theme.dart';
+import 'blocked_muted_screen.dart';
 import 'edit_profile_screen.dart';
 
 /// Account & settings surface, reachable from the profile screen.
 ///
 /// Listens via `AnimatedBuilder(animation: ProfileRepository.instance)` so the
 /// private-account toggle reflects `currentUser.isPrivate` reactively. Sections:
-/// Account (edit profile, private-account toggle), Privacy & Safety
-/// (placeholder entry points wired in FEAT-006), Your data (export + delete
-/// scaffolding), and Sign out (reusing [AuthRepository.signOut]).
+/// Account (edit profile, private-account toggle), Privacy & Safety (blocked +
+/// muted account management, wired to [BlockedMutedScreen] in FEAT-006), Your
+/// data (export + delete scaffolding), and Sign out (reusing
+/// [AuthRepository.signOut]).
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
 
@@ -185,14 +187,26 @@ class SettingsScreen extends StatelessWidget {
                 title: const Text('Blocked accounts'),
                 trailing: const Icon(Icons.chevron_right,
                     color: AppColors.secondaryText),
-                onTap: () => _showComingSoon(context, 'Blocked accounts'),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const BlockedMutedScreen(
+                      kind: SafetyListKind.blocked,
+                    ),
+                  ),
+                ),
               ),
               ListTile(
                 leading: const Icon(Icons.volume_off_outlined),
                 title: const Text('Muted accounts'),
                 trailing: const Icon(Icons.chevron_right,
                     color: AppColors.secondaryText),
-                onTap: () => _showComingSoon(context, 'Muted accounts'),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const BlockedMutedScreen(
+                      kind: SafetyListKind.muted,
+                    ),
+                  ),
+                ),
               ),
               const Divider(),
               const _SectionHeader('Your data'),
@@ -226,17 +240,6 @@ class SettingsScreen extends StatelessWidget {
     );
   }
 
-  void _showComingSoon(BuildContext context, String label) {
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(
-          content: Text('$label management is coming soon.'),
-          backgroundColor: AppColors.surface,
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-  }
 }
 
 class _SectionHeader extends StatelessWidget {

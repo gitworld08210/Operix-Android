@@ -102,6 +102,25 @@ abstract final class MockData {
     devrel,
   ];
 
+  // -- Safety (blocks / mutes) ---------------------------------------------
+
+  /// Seed set of user ids the current user has blocked. Deliberately EMPTY so
+  /// the default feed is unchanged (existing feed assertions must not shift)
+  /// and the [SafetyRepository] block filter is a pure pass-through until the
+  /// user blocks someone. Blocks are also server-backed (public.blocks); this
+  /// is only the offline/mock seed.
+  static Set<String> blockedUserIds() => <String>{};
+
+  /// Seed set of user ids the current user has muted. Deliberately EMPTY (see
+  /// [blockedUserIds]). Mute is client-authoritative this phase (no server
+  /// table), so this is the sole source of truth offline.
+  static Set<String> mutedUserIds() => <String>{};
+
+  /// Seed set of muted keywords. Deliberately EMPTY; reserved for a later
+  /// keyword-mute product surface. Kept here so the safety seed lives with the
+  /// other mock data.
+  static Set<String> muteWords() => <String>{};
+
   // -- Posts ---------------------------------------------------------------
 
   static List<Post> posts() {

@@ -6,6 +6,7 @@ import '../supabase_config.dart';
 import 'feed_page.dart';
 import 'feed_ranking.dart';
 import 'mock_data.dart';
+import 'safety_repository.dart';
 
 /// The post store for the app, backed by Supabase.
 ///
@@ -46,15 +47,32 @@ class PostRepository extends ChangeNotifier {
   final List<Post> _posts;
 
   /// The "For you" timeline (all posts, ranked by [_ranking]).
+  ///
+  /// Blocked/muted authors are hidden via the pure [filterHidden] helper,
+  /// applied AFTER ranking so ordering is unchanged for visible posts. The
+  /// filter is IDENTITY when the safety sets are empty (the default), so this
+  /// preserves the exact feed contents/ordering the repository tests assert.
   List<Post> forYou() {
-    return List<Post>.unmodifiable(_ranking.rank(_posts));
+    return List<Post>.unmodifiable(_visible(_ranking.rank(_posts)));
   }
 
   /// The "Following" timeline (a subset by author, ranked by [_ranking]).
   List<Post> following() {
     final followedIds = MockData.followingPosts().map((p) => p.author.id).toSet();
     final subset = _posts.where((p) => followedIds.contains(p.author.id)).toList();
-    return List<Post>.unmodifiable(_ranking.rank(subset));
+    return List<Post>.unmodifiable(_visible(_ranking.rank(subset)));
+  }
+
+  /// Applies the optimistic block/mute filter over the current
+  /// [SafetyRepository] sets. Delegates to the pure [filterHidden] helper,
+  /// which is identity (pass-through) when both sets are empty.
+  List<Post> _visible(List<Post> ranked) {
+    final safety = SafetyRepository.instance;
+    return filterHidden(
+      ranked,
+      blocked: safety.blockedIds,
+      muted: safety.mutedIds,
+    );
   }
 
   /// Hydrates [_posts] from Supabase with a BOUNDED, keyset-ordered query.
