@@ -10,6 +10,7 @@ class NotificationItem {
     required this.type,
     required this.actor,
     this.preview,
+    this.postId,
     required this.createdAt,
     this.read = false,
   });
@@ -21,6 +22,11 @@ class NotificationItem {
   /// Optional preview text (e.g. the post that was liked/replied to).
   final String? preview;
 
+  /// The id of the post this notification refers to, when applicable
+  /// (like/reply/repost/mention). Null for follow notifications. Used to
+  /// navigate to the relevant post detail on tap.
+  final String? postId;
+
   final DateTime createdAt;
   final bool read;
 
@@ -29,6 +35,7 @@ class NotificationItem {
     NotificationType? type,
     UserProfile? actor,
     String? preview,
+    String? postId,
     DateTime? createdAt,
     bool? read,
   }) {
@@ -37,6 +44,7 @@ class NotificationItem {
       type: type ?? this.type,
       actor: actor ?? this.actor,
       preview: preview ?? this.preview,
+      postId: postId ?? this.postId,
       createdAt: createdAt ?? this.createdAt,
       read: read ?? this.read,
     );

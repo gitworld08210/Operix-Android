@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 
+import '../data/message_repository.dart';
+import '../data/notification_repository.dart';
 import '../data/profile_repository.dart';
+import '../models/user_profile.dart';
 import '../screens/compose_screen.dart';
 import '../screens/home_feed_screen.dart';
 import '../screens/messages_screen.dart';
@@ -8,6 +11,7 @@ import '../screens/notifications_screen.dart';
 import '../screens/profile_screen.dart';
 import '../screens/search_screen.dart';
 import '../theme/app_colors.dart';
+import 'app_drawer.dart';
 
 /// The app shell: an [IndexedStack] body driven by a bottom [NavigationBar]
 /// with Home / Search / Compose / Notifications / Messages. Compose opens a
@@ -18,6 +22,17 @@ class AppScaffold extends StatefulWidget {
 
   @override
   State<AppScaffold> createState() => _AppScaffoldState();
+}
+
+/// Key on the shell [Scaffold] so nested screens (e.g. the Home feed, which
+/// has its own inner Scaffold + AppBar) can open the shell's navigation
+/// drawer via [openAppDrawer].
+final GlobalKey<ScaffoldState> appShellScaffoldKey = GlobalKey<ScaffoldState>();
+
+/// Opens the app shell's left navigation drawer. Safe to call from nested
+/// screens; no-op if the shell isn't mounted yet.
+void openAppDrawer() {
+  appShellScaffoldKey.currentState?.openDrawer();
 }
 
 class _AppScaffoldState extends State<AppScaffold> {
@@ -52,6 +67,8 @@ class _AppScaffoldState extends State<AppScaffold> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      key: appShellScaffoldKey,
+      drawer: const AppDrawer(),
       body: IndexedStack(index: _index, children: _pages),
       bottomNavigationBar: DecoratedBox(
         decoration: const BoxDecoration(
@@ -59,11 +76,14 @@ class _AppScaffoldState extends State<AppScaffold> {
             top: BorderSide(color: AppColors.border, width: 0.5),
           ),
         ),
-        // Listen to the profile repository so the unread badges refresh live
-        // (e.g. after markNotificationsRead) without needing an unrelated
-        // shell rebuild.
+        // Listen to the notification + message repositories so the unread
+        // badges refresh live (e.g. after markNotificationsRead) without
+        // needing an unrelated shell rebuild.
         child: AnimatedBuilder(
-          animation: ProfileRepository.instance,
+          animation: Listenable.merge(<Listenable>[
+            NotificationRepository.instance,
+            MessageRepository.instance,
+          ]),
           builder: (context, _) => NavigationBar(
             selectedIndex: _index,
             onDestinationSelected: _onDestinationSelected,
@@ -93,22 +113,22 @@ class _AppScaffoldState extends State<AppScaffold> {
             NavigationDestination(
               icon: _NotifIcon(
                 icon: Icons.notifications_none,
-                count: ProfileRepository.instance.unreadNotifications,
+                count: NotificationRepository.instance.unreadNotifications,
               ),
               selectedIcon: _NotifIcon(
                 icon: Icons.notifications,
-                count: ProfileRepository.instance.unreadNotifications,
+                count: NotificationRepository.instance.unreadNotifications,
               ),
               label: 'Notifications',
             ),
             NavigationDestination(
               icon: _NotifIcon(
                 icon: Icons.mail_outline,
-                count: ProfileRepository.instance.unreadMessages,
+                count: MessageRepository.instance.unreadMessages,
               ),
               selectedIcon: _NotifIcon(
                 icon: Icons.mail,
-                count: ProfileRepository.instance.unreadMessages,
+                count: MessageRepository.instance.unreadMessages,
               ),
               label: 'Messages',
             ),
@@ -120,11 +140,14 @@ class _AppScaffoldState extends State<AppScaffold> {
   }
 }
 
-/// Navigates to the current user's profile.
+/// Navigates to the current user's profile. No-op until the current user has
+/// loaded (profiles are fetched asynchronously after sign-in).
 void openProfile(BuildContext context) {
+  final UserProfile? user = ProfileRepository.instance.currentUser;
+  if (user == null) return;
   Navigator.of(context).push(
     MaterialPageRoute<void>(
-      builder: (_) => ProfileScreen(profile: ProfileRepository.instance.currentUser),
+      builder: (_) => ProfileScreen(profile: user),
     ),
   );
 }

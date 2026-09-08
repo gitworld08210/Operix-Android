@@ -1,19 +1,27 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../data/auth_repository.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
 import '../theme/app_theme.dart';
 
-/// Two-step email one-time-code sign-in / sign-up screen.
+/// X-faithful multi-step sign-in / sign-up screen.
 ///
-/// Step 1 collects an email and sends a login code via
-/// [AuthRepository.sendOtp]. Step 2 collects the 6-digit code and verifies it
-/// via [AuthRepository.verifyOtp]. On successful verification the app's
-/// `AuthGate` (which listens to Supabase auth state) automatically swaps this
-/// screen for the main shell, so no explicit navigation is needed here.
+/// The visual flow mirrors X (Twitter): a black welcome screen with the white
+/// X wordmark, then an "Enter your email address" step, then a 6-digit code
+/// step. The WORKING mechanism underneath is email OTP delivered via Azure
+/// Communication Services through two Supabase Edge Functions:
+/// [AuthRepository.sendOtp] emails the 6-digit code and
+/// [AuthRepository.verifyOtp] verifies it and finalizes the session. On
+/// successful verification the app's `AuthGate` (which listens to Supabase auth
+/// state) automatically swaps this screen for the main shell, so no explicit
+/// navigation is needed on success.
+///
+/// Honesty constraints: this Supabase project has no SMS provider, so any
+/// phone / social affordance either routes into the working email flow or
+/// shows a clear "not available yet, use email" message. Nothing here
+/// fabricates a fake OTP or silently fails.
 class AuthScreen extends StatefulWidget {
   const AuthScreen({super.key});
 
@@ -21,24 +29,54 @@ class AuthScreen extends StatefulWidget {
   State<AuthScreen> createState() => _AuthScreenState();
 }
 
-enum _Step { email, code }
+enum _Step { welcome, email, code }
 
 class _AuthScreenState extends State<AuthScreen> {
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _codeController = TextEditingController();
 
-  _Step _step = _Step.email;
+  _Step _step = _Step.welcome;
   bool _busy = false;
+  bool _emailValid = false;
+  bool _codeComplete = false;
   String _email = '';
 
   @override
+  void initState() {
+    super.initState();
+    _emailController.addListener(_onEmailChanged);
+    _codeController.addListener(_onCodeChanged);
+  }
+
+  @override
   void dispose() {
+    _emailController.removeListener(_onEmailChanged);
+    _codeController.removeListener(_onCodeChanged);
     _emailController.dispose();
     _codeController.dispose();
     super.dispose();
   }
 
-  void _showError(String message) {
+  void _onEmailChanged() {
+    final valid = _isValidEmail(_emailController.text);
+    if (valid != _emailValid) setState(() => _emailValid = valid);
+  }
+
+  void _onCodeChanged() {
+    final complete = _codeController.text.trim().length == 6;
+    if (complete != _codeComplete) setState(() => _codeComplete = complete);
+  }
+
+  bool _isValidEmail(String value) {
+    final email = value.trim();
+    return email.contains('@') && email.indexOf('@') > 0;
+  }
+
+  void _showError(String message) => _showSnack(message);
+
+  void _showInfo(String message) => _showSnack(message);
+
+  void _showSnack(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
@@ -51,22 +89,17 @@ class _AuthScreenState extends State<AuthScreen> {
       );
   }
 
-  void _showInfo(String message) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(
-          content: Text(message),
-          backgroundColor: AppColors.surface,
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+  /// Honest handling for phone / social affordances: no SMS or OAuth provider
+  /// is configured on this project, so we surface a clear message and keep the
+  /// user on the working email path rather than pretending to sign them in.
+  void _useEmailInstead(String reason) {
+    _showInfo(reason);
+    setState(() => _step = _Step.email);
   }
 
   Future<void> _sendCode() async {
     final email = _emailController.text.trim();
-    if (email.isEmpty || !email.contains('@')) {
+    if (!_isValidEmail(email)) {
       _showError('Enter a valid email address.');
       return;
     }
@@ -79,10 +112,25 @@ class _AuthScreenState extends State<AuthScreen> {
         _step = _Step.code;
       });
       _showInfo('We sent a code to $email.');
-    } on AuthException catch (e) {
+    } on OtpException catch (e) {
       _showError(e.message);
     } catch (_) {
       _showError('Could not send the code. Please try again.');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _resendCode() async {
+    if (_busy || _email.isEmpty) return;
+    setState(() => _busy = true);
+    try {
+      await AuthRepository.instance.sendOtp(_email);
+      _showInfo('We sent a new code to $_email.');
+    } on OtpException catch (e) {
+      _showError(e.message);
+    } catch (_) {
+      _showError('Could not resend the code. Please try again.');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -98,7 +146,9 @@ class _AuthScreenState extends State<AuthScreen> {
     try {
       await AuthRepository.instance.verifyOtp(email: _email, token: token);
       // On success the AuthGate stream flips to the main shell automatically.
-    } on AuthException catch (e) {
+    } on OtpException catch (e) {
+      // Surface the repository's human-readable message (invalid/expired code,
+      // too many attempts, ...) which already includes a resend hint.
       _showError(e.message);
     } catch (_) {
       _showError('Could not verify the code. Please try again.');
@@ -119,157 +169,377 @@ class _AuthScreenState extends State<AuthScreen> {
     return Scaffold(
       backgroundColor: AppColors.background,
       body: SafeArea(
-        child: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(AppSpacing.xl),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 420),
-              child: _step == _Step.email
-                  ? _buildEmailStep()
-                  : _buildCodeStep(),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.xl,
+            vertical: AppSpacing.lg,
+          ),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              minHeight: MediaQuery.of(context).size.height -
+                  MediaQuery.of(context).padding.vertical -
+                  (AppSpacing.lg * 2),
+              maxWidth: 480,
             ),
+            child: switch (_step) {
+              _Step.welcome => _buildWelcomeStep(),
+              _Step.email => _buildEmailStep(),
+              _Step.code => _buildCodeStep(),
+            },
           ),
         ),
       ),
     );
   }
 
-  Widget _buildEmailStep() {
+  // ---------------------------------------------------------------------------
+  // Welcome step
+  // ---------------------------------------------------------------------------
+
+  Widget _buildWelcomeStep() {
     return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
-        Text('Sign in to Oneleven', style: AppTextStyles.display),
-        const SizedBox(height: AppSpacing.sm),
-        Text(
-          'Enter your email and we\'ll send you a one-time code. New here? '
-          'An account is created automatically.',
-          style: AppTextStyles.handle,
+        const SizedBox(height: AppSpacing.xxl),
+        const Center(child: _XWordmark(size: 44)),
+        const SizedBox(height: AppSpacing.xxl * 2),
+        Text('See what\'s happening', style: AppTextStyles.headline),
+        const SizedBox(height: AppSpacing.xl),
+        // Circular social row. No OAuth provider is configured, so each button
+        // honestly routes into the working email flow with an explanation.
+        Row(
+          children: <Widget>[
+            _CircleSocialButton(
+              label: 'G',
+              tooltip: 'Continue with Google',
+              onPressed: _busy
+                  ? null
+                  : () => _useEmailInstead(
+                        'Google sign-in isn\'t available yet. Use email.',
+                      ),
+            ),
+            const SizedBox(width: AppSpacing.md),
+            _CircleSocialButton(
+              icon: Icons.alternate_email,
+              tooltip: 'Continue with email',
+              onPressed: _busy ? null : () => setState(() => _step = _Step.email),
+            ),
+          ],
         ),
         const SizedBox(height: AppSpacing.xl),
-        // TODO: phone OTP is out of scope; only email OTP is supported here.
-        TextField(
-          controller: _emailController,
-          enabled: !_busy,
-          keyboardType: TextInputType.emailAddress,
-          autofillHints: const <String>[AutofillHints.email],
-          textInputAction: TextInputAction.done,
-          style: AppTextStyles.body,
-          onSubmitted: (_) => _busy ? null : _sendCode(),
-          decoration: _fieldDecoration('Email', 'you@example.com'),
+        const _OrDivider(),
+        const SizedBox(height: AppSpacing.xl),
+        // Full-width WHITE pill primary button. For visual fidelity it reads
+        // "Continue with Phone", but since no SMS provider exists it honestly
+        // routes into the email flow with an explanation.
+        SizedBox(
+          width: double.infinity,
+          child: ElevatedButton(
+            style: AppTheme.whitePillButton(),
+            onPressed: _busy
+                ? null
+                : () => _useEmailInstead(
+                      'Phone sign-in isn\'t available yet. Use email.',
+                    ),
+            child: const Text('Continue with Phone'),
+          ),
         ),
         const SizedBox(height: AppSpacing.lg),
-        _PrimaryButton(
-          label: 'Send code',
-          busy: _busy,
-          onPressed: _busy ? null : _sendCode,
+        const _LegalText(),
+        const SizedBox(height: AppSpacing.xxl),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: <Widget>[
+            Text('Have an account already?', style: AppTextStyles.subtitle),
+            TextButton(
+              onPressed: _busy ? null : () => setState(() => _step = _Step.email),
+              style: TextButton.styleFrom(foregroundColor: AppColors.accent),
+              child: const Text('Log in'),
+            ),
+          ],
+        ),
+        Center(
+          child: TextButton(
+            onPressed: _busy ? null : () => setState(() => _step = _Step.email),
+            style: TextButton.styleFrom(foregroundColor: AppColors.accent),
+            child: const Text('Login with username / Use email'),
+          ),
         ),
       ],
     );
   }
 
-  Widget _buildCodeStep() {
+  // ---------------------------------------------------------------------------
+  // Email step
+  // ---------------------------------------------------------------------------
+
+  Widget _buildEmailStep() {
     return Column(
-      mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
-        Text('Enter your code', style: AppTextStyles.display),
+        _AuthTopBar(
+          onBack: _busy ? null : () => setState(() => _step = _Step.welcome),
+          trailingLabel: 'Use phone',
+          onTrailing: _busy
+              ? null
+              : () => _showInfo(
+                    'Phone sign-in isn\'t available yet. Use email.',
+                  ),
+        ),
+        const SizedBox(height: AppSpacing.xxl),
+        Text('Enter your email address', style: AppTextStyles.headline),
         const SizedBox(height: AppSpacing.sm),
-        Text('We sent a 6-digit code to $_email.', style: AppTextStyles.handle),
-        const SizedBox(height: AppSpacing.xl),
+        Text('We\'ll send you a verification code', style: AppTextStyles.subtitle),
+        const SizedBox(height: AppSpacing.xxl),
+        TextField(
+          controller: _emailController,
+          enabled: !_busy,
+          autofocus: true,
+          keyboardType: TextInputType.emailAddress,
+          autofillHints: const <String>[AutofillHints.email],
+          textInputAction: TextInputAction.done,
+          style: AppTextStyles.body,
+          cursorColor: AppColors.accent,
+          onSubmitted: (_) => (_busy || !_emailValid) ? null : _sendCode(),
+          decoration: _inlineFieldDecoration('Email'),
+        ),
+        const SizedBox(height: AppSpacing.xxl),
+        SizedBox(
+          width: double.infinity,
+          child: ElevatedButton(
+            style: AppTheme.darkPillButton(),
+            onPressed: (_busy || !_emailValid) ? null : _sendCode,
+            child: _busy ? const _ButtonSpinner() : const Text('Continue'),
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Code step
+  // ---------------------------------------------------------------------------
+
+  Widget _buildCodeStep() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        _AuthTopBar(
+          onBack: _busy ? null : _changeEmail,
+          trailingLabel: 'Change email',
+          onTrailing: _busy ? null : _changeEmail,
+        ),
+        const SizedBox(height: AppSpacing.xxl),
+        Text('We sent you a code', style: AppTextStyles.headline),
+        const SizedBox(height: AppSpacing.sm),
+        Text('Enter it below to verify $_email', style: AppTextStyles.subtitle),
+        const SizedBox(height: AppSpacing.xxl),
         TextField(
           controller: _codeController,
           enabled: !_busy,
+          autofocus: true,
           keyboardType: TextInputType.number,
           maxLength: 6,
           textInputAction: TextInputAction.done,
           inputFormatters: <TextInputFormatter>[
             FilteringTextInputFormatter.digitsOnly,
           ],
-          style: AppTextStyles.display,
-          onSubmitted: (_) => _busy ? null : _verifyCode(),
-          decoration: _fieldDecoration('6-digit code', '000000'),
+          style: AppTextStyles.display.copyWith(letterSpacing: 8),
+          cursorColor: AppColors.accent,
+          onSubmitted: (_) => (_busy || !_codeComplete) ? null : _verifyCode(),
+          decoration: _inlineFieldDecoration('Verification code'),
         ),
-        const SizedBox(height: AppSpacing.sm),
-        _PrimaryButton(
-          label: 'Verify',
-          busy: _busy,
-          onPressed: _busy ? null : _verifyCode,
-        ),
-        const SizedBox(height: AppSpacing.sm),
         Align(
-          alignment: Alignment.center,
+          alignment: Alignment.centerLeft,
           child: TextButton(
-            onPressed: _busy ? null : _changeEmail,
+            onPressed: _busy ? null : _resendCode,
             style: TextButton.styleFrom(foregroundColor: AppColors.accent),
-            child: const Text('Change email'),
+            child: const Text('Resend code'),
+          ),
+        ),
+        const SizedBox(height: AppSpacing.lg),
+        SizedBox(
+          width: double.infinity,
+          child: ElevatedButton(
+            style: AppTheme.darkPillButton(),
+            onPressed: (_busy || !_codeComplete) ? null : _verifyCode,
+            child: _busy ? const _ButtonSpinner() : const Text('Next'),
           ),
         ),
       ],
     );
   }
 
-  InputDecoration _fieldDecoration(String label, String hint) {
+  /// Minimal inline (underline) field decoration matching X's borderless look
+  /// rather than the app's default filled pill.
+  InputDecoration _inlineFieldDecoration(String label) {
     return InputDecoration(
       labelText: label,
-      hintText: hint,
       labelStyle: AppTextStyles.handle,
-      hintStyle: AppTextStyles.handle,
-      filled: true,
-      fillColor: AppColors.surface,
+      floatingLabelStyle: AppTextStyles.handle.copyWith(color: AppColors.accent),
+      filled: false,
       counterText: '',
-      enabledBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(AppRadii.md),
-        borderSide: const BorderSide(color: AppColors.border),
+      contentPadding: const EdgeInsets.symmetric(vertical: AppSpacing.md),
+      enabledBorder: const UnderlineInputBorder(
+        borderSide: BorderSide(color: AppColors.border),
       ),
-      focusedBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(AppRadii.md),
-        borderSide: const BorderSide(color: AppColors.accent),
+      focusedBorder: const UnderlineInputBorder(
+        borderSide: BorderSide(color: AppColors.accent, width: 2),
       ),
-      border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(AppRadii.md),
-        borderSide: const BorderSide(color: AppColors.border),
+      border: const UnderlineInputBorder(
+        borderSide: BorderSide(color: AppColors.border),
       ),
     );
   }
 }
 
-class _PrimaryButton extends StatelessWidget {
-  const _PrimaryButton({
-    required this.label,
-    required this.busy,
-    required this.onPressed,
+/// X-style top bar for the email/code steps: a back button on the left, a
+/// small centered X wordmark, and a text action on the right. Uses comfortable
+/// touch targets and vertical breathing room so it doesn't crowd the status
+/// bar the way a bare Row did.
+class _AuthTopBar extends StatelessWidget {
+  const _AuthTopBar({
+    required this.onBack,
+    required this.trailingLabel,
+    required this.onTrailing,
   });
 
-  final String label;
-  final bool busy;
-  final VoidCallback? onPressed;
+  final VoidCallback? onBack;
+  final String trailingLabel;
+  final VoidCallback? onTrailing;
 
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      width: double.infinity,
       height: 48,
-      child: ElevatedButton(
-        onPressed: onPressed,
-        style: ElevatedButton.styleFrom(
-          backgroundColor: AppColors.accent,
-          foregroundColor: AppColors.white,
-          disabledBackgroundColor: AppColors.accent.withOpacity(0.5),
-          shape: const StadiumBorder(),
-          textStyle: AppTextStyles.label,
+      child: Row(
+        children: <Widget>[
+          IconButton(
+            onPressed: onBack,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+            icon: const Icon(Icons.arrow_back, color: AppColors.primaryText),
+            tooltip: 'Back',
+          ),
+          const Expanded(child: Center(child: _XWordmark(size: 28))),
+          TextButton(
+            onPressed: onTrailing,
+            style: TextButton.styleFrom(
+              foregroundColor: AppColors.primaryText,
+              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
+            ),
+            child: Text(trailingLabel),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// White X wordmark built from a bold styled glyph (no external image asset,
+/// so it renders offline). Uses the app's sans stack via [AppTextStyles].
+class _XWordmark extends StatelessWidget {
+  const _XWordmark({required this.size});
+
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      'X',
+      style: AppTextStyles.headline.copyWith(
+        fontSize: size,
+        fontWeight: FontWeight.w900,
+        color: AppColors.white,
+        letterSpacing: -1,
+        height: 1,
+      ),
+    );
+  }
+}
+
+/// Circular social/action button used on the welcome step.
+class _CircleSocialButton extends StatelessWidget {
+  const _CircleSocialButton({
+    this.icon,
+    this.label,
+    required this.tooltip,
+    required this.onPressed,
+  });
+
+  final IconData? icon;
+  final String? label;
+  final String tooltip;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final Widget child = icon != null
+        ? Icon(icon, color: AppColors.background, size: 22)
+        : Text(
+            label ?? '',
+            style: AppTextStyles.title.copyWith(color: AppColors.background),
+          );
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: AppColors.white,
+        shape: const CircleBorder(),
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: onPressed,
+          child: SizedBox(width: 44, height: 44, child: Center(child: child)),
         ),
-        child: busy
-            ? const SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  valueColor:
-                      AlwaysStoppedAnimation<Color>(AppColors.white),
-                ),
-              )
-            : Text(label),
+      ),
+    );
+  }
+}
+
+/// "or" divider with hairlines on either side.
+class _OrDivider extends StatelessWidget {
+  const _OrDivider();
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: <Widget>[
+        const Expanded(child: Divider(color: AppColors.border, thickness: 0.5)),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
+          child: Text('or', style: AppTextStyles.subtitle),
+        ),
+        const Expanded(child: Divider(color: AppColors.border, thickness: 0.5)),
+      ],
+    );
+  }
+}
+
+/// Small legal blurb shown under the primary welcome button.
+class _LegalText extends StatelessWidget {
+  const _LegalText();
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      'By signing up, you agree to the Terms of Service and Privacy Policy, '
+      'including Cookie Use.',
+      style: AppTextStyles.caption,
+    );
+  }
+}
+
+/// Small white spinner shown inside a busy pill button.
+class _ButtonSpinner extends StatelessWidget {
+  const _ButtonSpinner();
+
+  @override
+  Widget build(BuildContext context) {
+    return const SizedBox(
+      width: 20,
+      height: 20,
+      child: CircularProgressIndicator(
+        strokeWidth: 2,
+        valueColor: AlwaysStoppedAnimation<Color>(AppColors.primaryText),
       ),
     );
   }

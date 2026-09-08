@@ -29,6 +29,35 @@ abstract final class AppRadii {
 abstract final class AppTheme {
   const AppTheme._();
 
+  /// X-exact white pill button (e.g. auth "Continue with Phone", primary
+  /// full-width actions). Solid white fill, black label, stadium shape.
+  static ButtonStyle whitePillButton() => ElevatedButton.styleFrom(
+        backgroundColor: AppColors.white,
+        foregroundColor: AppColors.background,
+        disabledBackgroundColor: AppColors.secondaryText,
+        disabledForegroundColor: AppColors.background,
+        elevation: 0,
+        textStyle: AppTextStyles.label.copyWith(color: AppColors.background),
+        shape: const StadiumBorder(),
+        minimumSize: const Size.fromHeight(52),
+        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
+      );
+
+  /// X-exact dark "Continue" pill variant: transparent fill with a hairline
+  /// border, used for secondary pill actions on the true-black background.
+  static ButtonStyle darkPillButton() => ElevatedButton.styleFrom(
+        backgroundColor: AppColors.background,
+        foregroundColor: AppColors.primaryText,
+        disabledBackgroundColor: AppColors.background,
+        disabledForegroundColor: AppColors.secondaryText,
+        elevation: 0,
+        textStyle: AppTextStyles.label,
+        side: const BorderSide(color: AppColors.border),
+        shape: const StadiumBorder(),
+        minimumSize: const Size.fromHeight(52),
+        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
+      );
+
   static ThemeData buildDarkTheme() {
     const colorScheme = ColorScheme.dark(
       brightness: Brightness.dark,

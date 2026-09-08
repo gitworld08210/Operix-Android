@@ -7,12 +7,14 @@ Oneleven is dark-first: true-black background, X-blue accent (`#1D9BF0`), clean 
 ## Status
 
 > **Not compiled in this environment.** This project was authored **by hand without an available Flutter/Dart/Android toolchain and with no network access**, so it has **not** been compiled, analyzed, or run in-sandbox. A developer must run `flutter pub get` and `flutter run` on a Flutter-equipped machine to build, verify, and launch it. Every file was written and cross-checked manually; treat the first real `flutter analyze` as the source of truth.
+>
+> **CI builds the APK.** A GitHub Actions workflow (`.github/workflows/android.yml`) runs `flutter pub get` / `analyze` / `test` and `flutter build apk --release` on every push and pull request (and via manual dispatch), then uploads the APK as a downloadable build artifact (`oneleven-release-apk`). It needs no secrets: `lib/supabase_config.dart` bakes in the public Supabase URL + publishable key defaults (optional `SUPABASE_URL` / `SUPABASE_ANON_KEY` repo secrets override them via `--dart-define`). This is where the APK actually compiles. See [Building the APK](#building-the-apk).
 
-The app is feature-complete for a first pass across three increments:
+The app is a fully Supabase-backed social app. It was built across an initial UI/backend pass and then a de-mock rebuild that removed the last of the in-memory sample data:
 
-- **FEAT-001 (foundation):** standard Flutter project files, a complete `android/` Gradle scaffold (namespace / applicationId `com.oneleven.app`, label "Oneleven"), the centralized theme (`lib/theme/`), the data models (`lib/models/`), and in-memory mock repositories with sample data (`lib/data/`).
-- **FEAT-002 (UI):** `lib/main.dart`, reusable widgets (`lib/widgets/`), and all screens (`lib/screens/`) wired to the repositories, plus the Supabase email-OTP auth screen (`lib/screens/auth_screen.dart`) and auth gate.
-- **FEAT-003 (Supabase backend):** `lib/supabase_config.dart`, `lib/data/auth_repository.dart`, `lib/data/storage_service.dart`, the `supabase/migrations/0001_init.sql` schema, and Supabase-backed `PostRepository` / `ProfileRepository` (with a `MockData` fallback). See **Backend (Supabase)** below.
+- **UI + backend foundation:** standard Flutter project files, a complete `android/` Gradle scaffold (namespace / applicationId `com.oneleven.app`, label "Oneleven"), the centralized theme (`lib/theme/`), the data models (`lib/models/`), `lib/main.dart`, reusable widgets (`lib/widgets/`), all screens (`lib/screens/`), the Supabase email-OTP auth screen + auth gate, `lib/supabase_config.dart`, `lib/data/auth_repository.dart`, `lib/data/storage_service.dart`, and the `supabase/migrations/` schema.
+- **Data-layer de-mock:** `lib/data/mock_data.dart` was **deleted**. Every repository (`PostRepository`, `ProfileRepository`, `NotificationRepository`, `MessageRepository`) is now 100% Supabase-backed with explicit load-state (`lib/data/load_status.dart`) and **no mock fallback**. Row -> model parsing lives in pure helpers (`lib/data/mappers.dart`) so it is unit-testable without a client.
+- **Content + notifications + DMs:** post detail with threaded replies, a real bookmarks screen, real follow/unfollow, DB-backed search RPCs, start-a-DM from a profile, real notifications, and Supabase Realtime on posts/messages/notifications/conversations. See **Backend (Supabase)** below.
 
 ## Folder structure
 
@@ -23,45 +25,125 @@ oneleven_app/
     main.dart                  # App entry; MaterialApp + dark theme + home shell
     theme/                     # app_colors, app_text_styles, app_theme (+ spacing/radii)
     models/                    # post, user_profile, notification_item, conversation
-    data/                      # mock_data, post/profile/auth repositories (ChangeNotifier singletons), storage_service
+    data/                      # post/profile/notification/message/auth repositories (ChangeNotifier singletons),
+                               #   load_status, mappers (pure row->model helpers), storage_service
     supabase_config.dart       # Supabase URL/anon-key + initSupabase()
-    utils/                     # format.dart (fmtCount, timeAgo)
+    utils/                     # format.dart (fmtCount, timeAgo), ids.dart (client UUIDs)
     widgets/                   # avatar, verified_badge, action_button, post_card, app_scaffold
     screens/                   # home_feed, search, compose, notifications, messages,
-                               #   conversation, profile
+                               #   conversation, profile, post_detail, bookmarks
 ```
 
 ## Implemented vs scaffold
 
-**Implemented (functional against mock data):**
+**Implemented (functional against live Supabase data):**
 
-- Bottom navigation shell with 5 destinations: Home, Search, Compose, Notifications, Messages. Compose opens a full-screen modal route; Profile is reachable from the Home top-bar avatar.
-- **Home feed** with **For You / Following** tabs, listing `PostCard`s from `PostRepository`. Like / Repost / Bookmark toggle live counts and filled icons through the repository.
-- **PostCard** mirroring the web design: avatar + content columns, bold display name + verification badge + `@handle` + relative time + more menu, `#hashtag` / `@mention` linkification in X-blue, "Show more" truncation, optional rounded media (image, or a play-icon placeholder for video), and the full action row (Reply, Repost, Like, Views, Bookmark, Share). All `Image.network` calls have loading + error fallbacks so a blocked network never crashes the app.
-- **Search / Explore:** search field, trending chips, and a "Trends for you" list.
-- **Compose:** author avatar, multiline field, mock media/GIF/poll toolbar, character counter, and a Post button that adds to the feed.
-- **Notifications:** typed activity rows (like / reply / repost / follow / mention) with unread highlighting and "Mark all read".
-- **Messages + Conversation:** thread list with unread dots, and a chat view with left/right bubbles and a local send composer.
-- **Profile:** banner, overlapping avatar, name + badge, bio, follower/following counts, Edit/Follow button, and Posts / Media tabs.
+- Bottom navigation shell with 5 destinations: Home, Search, Compose, Notifications, Messages. Compose opens a full-screen modal route; Profile is reachable from the Home top-bar avatar. Unread badges on Notifications / Messages reflect the real `NotificationRepository.unreadNotifications` and `MessageRepository.unreadMessages`.
+- **Home feed** with **For You / Following** tabs, listing `PostCard`s from `PostRepository`. Each tab renders real **loading / empty / error (+ Retry)** states off `repo.status` and supports pull-to-refresh. Like / Repost / Bookmark write to their join tables and reflect the DB-owned counts. **Following** filters to authors the signed-in user actually follows.
+- **PostCard** mirroring the web design: avatar + content columns, bold display name + verification badge + `@handle` + relative time + more menu, `#hashtag` / `@mention` linkification in X-blue, "Show more" truncation, optional rounded media (image, or a play-icon placeholder for video), and the full action row (Reply, Repost, Like, Views, Bookmark, Share). Tapping a post opens the **post detail**; tapping an author opens their real profile. All `Image.network` calls have loading + error fallbacks so a blocked network never crashes the app.
+- **Post detail + replies** (`post_detail_screen.dart`): the parent post plus its threaded replies (`PostRepository.replies`) with loading/empty/error, and a reply composer that inserts a real reply (`addReply`, sets `parent_id`); the parent `reply_count` follows the DB trigger. **Share** copies a post link to the clipboard (pure Flutter SDK, no share package).
+- **Search / Explore:** a debounced field backed by the DB. People come from the `search_profiles` RPC and posts from the `search_posts` RPC; results navigate to real profiles / post detail. The idle state shows suggested people to follow. Real loading / no-results / error states. **No fabricated trends.**
+- **Compose:** author avatar, multiline field, a media button that attaches a photo (gallery/camera) or a video (uploaded as a reel) via `image_picker`, an image preview, character counter, and a Post button that uploads any attached image to the `post-media` bucket then inserts a real `posts` row (with `media_url` / `media_type`) and reloads the feed so DB defaults/counters are authoritative.
+- **Notifications:** typed activity rows (like / reply / repost / follow / mention) from the `notifications` table with unread highlighting, real "Mark all read" (a DB update), tap-to-navigate to the target post/profile, and live realtime inserts.
+- **Messages + Conversation:** the thread list and chat view read/write the `conversations` / `conversation_participants` / `messages` tables. Sending inserts a real message row (preview/updated_at/unread are trigger-maintained); bubble side derives from `Message.fromMe`; a **Message** button on other users' profiles starts a new DM. Realtime keeps threads and unread badges live.
+- **Bookmarks** (`bookmarks_screen.dart`): the signed-in user's bookmarked posts, reachable from their profile.
+- **Profile:** Supabase-backed for **any** user: banner, large overlapping avatar, name + badge, an own-user "Get verified" pill (honest placeholder, no fake purchase), `@handle`, bio, follower/following counts, and **Posts / Replies / Media** tabs. Own profile shows **Share** (copies a profile link) + **Edit profile** (name/bio persist) plus tap-to-change avatar (picked via `image_picker`, uploaded to the `avatars` bucket); other users show **Message** (starts a real DM) + a magenta **Subscribe**-style button wired to the real `toggleFollow` (`isFollowing` → "Following"). Posts reads `PostRepository.postsByOwner`, Media filters those to media posts, and Replies shows an honest empty state (no per-owner replies query exists). A **Who to follow** footer uses real `suggestedProfiles()` and is omitted when empty.
 
-**Out of scope for this Android app (not built):** Wallet, Premium, Verification purchase flow, Creator Hub, and Live. Media attachment, replies, and share are intentionally mocked (they surface a snackbar).
+**Out of scope for this Android app (not built):** Wallet, Premium, Verification purchase flow, Creator Hub, and Live. Media picking (avatar / post image / reel video) is now fully wired via `image_picker`; see [Media upload note](#media-upload-note). There are no mock placeholders and no "not available in this demo" snackbars for the core feed / reply / share / follow / search / DM actions.
 
 ## Web-only surfaces (excluded from Android)
 
 **Ads Manager** and **Admin-OS** are **web-only** and are intentionally **not** part of this Android Flutter app. They remain in the React/Vite web project only.
 
+## Building the APK
+
+Locally, on a Flutter-equipped machine (Flutter `>=3.22`, Dart `>=3.3`, JDK 17
+for the Android toolchain):
+
+```sh
+flutter pub get
+flutter analyze
+flutter test
+flutter build apk --release
+# output: build/app/outputs/flutter-apk/app-release.apk
+```
+
+The release build is debug-signed (see `android/app/build.gradle`), so it
+produces an installable APK without any signing secrets. Supabase config has
+public defaults baked into `lib/supabase_config.dart`; override them if needed
+with `--dart-define=SUPABASE_URL=... --dart-define=SUPABASE_ANON_KEY=...`.
+
+In CI, `.github/workflows/android.yml` runs the same steps on every push /
+pull request (and on manual `workflow_dispatch`) and publishes the APK as the
+`oneleven-release-apk` artifact on the workflow run, so you can download it
+straight from the GitHub Actions tab without a local toolchain.
+
+## X-style UI overhaul
+
+The app was reskinned to faithfully match the real X (Twitter) Android UI while
+keeping every Supabase data path intact (this pass is visual/UX only — no
+repository signatures or data wiring changed):
+
+- **Auth flow** (`auth_screen.dart`) — an X-faithful multi-step welcome →
+  email → 6-digit code flow. The welcome screen leads with the big
+  "See what's happening" headline and pill CTAs; any phone/social affordance
+  honestly routes into the working **email OTP** flow (this app has no
+  SMS/OAuth provider). See [Authentication (email OTP)](#authentication-email-otp).
+- **Bottom navigation** (`widgets/app_scaffold.dart`) — the X 5-slot bar:
+  Home, Search, a center **compose** slot (blue circular `+`), Notifications
+  (with a live unread badge), and Messages. True-black bar, hairline top
+  divider, no elevation.
+- **Left navigation drawer** (`widgets/app_drawer.dart`) — opened from the Home
+  top-bar avatar: header with avatar, name, `@handle`, Following/Followers, then
+  Profile / Premium / Communities / Bookmarks / Lists / Spaces / Creator Studio /
+  Get Grok / Settings / Help entries. Sections without real backends route to a
+  single honest shared [`PlaceholderScreen`] rather than faking functionality.
+- **Profile** (`profile_screen.dart`) — banner + large overlapping avatar;
+  display name with a blue verification check when verified; a **"Get verified"**
+  pill for the current user (routes to the honest placeholder, no fake purchase
+  flow); `@handle`; a small meta row built **only from fields that exist** on
+  `UserProfile` (the model has **no** born/joined/location, so those are
+  deliberately omitted — nothing is fabricated); `N Following  M Followers`.
+  Buttons: own profile shows **Share** (copies a profile link via the clipboard,
+  mirroring `sharePost`) + **Edit profile** (outline); other users show
+  **Message** (outline, starts a real DM) + a filled magenta **Subscribe**-style
+  button wired to the real `toggleFollow`. Tabs are **Posts / Replies / Media**
+  with an accent underline indicator: Posts reads `PostRepository.postsByOwner`,
+  Media filters those to `hasMedia`, and Replies shows a clean "No replies yet"
+  empty state (there is no per-owner replies query in the data layer, so no
+  content is invented). A **Who to follow** footer uses real
+  `ProfileRepository.suggestedProfiles()` and is omitted when there are none.
+- **X post row** (`widgets/post_card.dart`) — avatar on the left; a single
+  header line (bold display name + blue verified check + `@handle` + `·` +
+  relative time + trailing `⋯`); body text with `#hashtag`/`@mention`
+  linkification and "Show more" truncation; optional rounded media; and a
+  full-width action row (Reply, Repost, Like, Views, then Bookmark + Share
+  grouped at the end) with tight spacing and a thin 0.5px bottom divider — no
+  card elevation or shadow. All engagement callbacks
+  (`onLike`/`onRepost`/`onBookmark`/`onReply`/`onShare`/`onTap`/`onAuthorTap`)
+  are preserved.
+- **Floating compose** — the Messages list carries a blue circular FAB
+  (`AppColors.accent`) to start a new DM; it opens Search to find a person
+  (a 1:1 thread is created from that person's profile), so it does not
+  duplicate the center-nav compose (which posts, not DMs).
+- **Consistent language** — search, notifications, messages, conversation,
+  compose, bookmarks, and post-detail all share the same spacing, hairline
+  dividers, pill buttons, avatars, and headers.
+
 ## Palette
 
-| Token          | Hex        |
-| -------------- | ---------- |
-| background     | `#000000`  |
-| surface/hover  | `#16181C`  |
-| border         | `#2F3336`  |
-| primary text   | `#E7E9EA`  |
-| secondary text | `#71767B`  |
-| accent (X blue)| `#1D9BF0`  |
-| like (rose)    | `#F91880`  |
-| repost (green) | `#00BA7C`  |
+| Token           | Hex        | Use                                         |
+| --------------- | ---------- | ------------------------------------------- |
+| background      | `#000000`  | true-black app background                   |
+| surface/hover   | `#16181C`  | elevated cards / hover tint                 |
+| border          | `#2F3336`  | hairline borders / dividers                 |
+| primary text    | `#E7E9EA`  | high-emphasis text                          |
+| secondary text  | `#71767B`  | muted text / `@handles`                     |
+| accent (X blue) | `#1D9BF0`  | primary accent, links, compose FAB          |
+| like (rose)     | `#F91880`  | like heart / engagement pink                |
+| repost (green)  | `#00BA7C`  | repost                                       |
+| subscribe       | `#C9379D`  | magenta Subscribe / creator upsell button   |
+| premium blue    | `#1DA1F2`  | softer premium/verified badge wash          |
 
 ## Running (on a Flutter-equipped machine)
 
@@ -130,107 +212,217 @@ owner-scoped. To make media private in a future version, flip the bucket
 
 ### Authentication (email OTP)
 
-Sign-up and login use **email one-time codes** (no passwords):
+Sign-up and login use **email one-time codes** (no passwords), delivered via
+**Azure Communication Services (ACS)** through two Supabase **Edge Functions**
+(`send-otp` and `verify-otp`). The auth screen is an X-styled multi-step flow
+(welcome → email → 6-digit code); any phone/social affordance honestly routes
+into this working email flow (this project has no SMS/OAuth provider, so
+nothing fabricates a code):
 
 1. The user enters an email on the auth screen; the app calls
-   `supabase.auth.signInWithOtp(email: ...)` (via `AuthRepository.sendOtp`).
-   Supabase emails a 6-digit code and, for a new email, creates the auth user
-   (and, through the trigger, a `profiles` row).
+   `supabase.functions.invoke('send-otp', body: {'email': ...})` (via
+   `AuthRepository.sendOtp`). The `send-otp` function generates a 6-digit code,
+   stores its hash, and emails the code through Azure Communication Services.
 2. The user enters the code; the app calls
-   `supabase.auth.verifyOTP(type: OtpType.email, email: ..., token: ...)`
-   (via `AuthRepository.verifyOtp`), which establishes the session.
-3. `main.dart`'s auth gate listens to auth state and shows the app shell when a
+   `supabase.functions.invoke('verify-otp', body: {'email': ..., 'code': ...})`
+   (via `AuthRepository.verifyOtp`). The `verify-otp` function validates the
+   code, finds-or-creates the auth user (setting `email_confirm` server-side),
+   and returns a **`token_hash`**.
+3. The client finalizes the Supabase session with
+   `supabase.auth.verifyOTP(type: OtpType.magiclink, tokenHash: token_hash)`.
+   After that `supabase.auth.currentSession` is non-null and
+   `onAuthStateChange` fires.
+4. `main.dart`'s auth gate listens to auth state and shows the app shell when a
    session exists, otherwise the auth screen. Signing out
    (`AuthRepository.signOut`) returns to the auth screen.
 
-**Phone OTP is out of scope** for this app; only email OTP is wired.
+The Flutter app never sees or holds any ACS credential: it only uses the public
+anon key (`lib/supabase_config.dart`) and invokes the Edge Functions. **Phone
+OTP is out of scope** for this app; only email OTP is wired.
 
-#### Required Supabase email template (6-digit code, not a magic link)
+#### Edge Functions and the ACS secret
 
-The auth UI collects a **6-digit code**, so the Supabase project's email
-template must send the token/code and not (only) a magic link. Configure it
-once in the dashboard:
+Both `send-otp` and `verify-otp` are deployed with **`verify_jwt = false`**
+(they are called before a session exists). They send email through Azure
+Communication Services using a connection string held **only server-side** in
+the Supabase secret **`AZURE_ACS_CONNECTION_STRING`** (read inside the
+functions via `Deno.env.get('AZURE_ACS_CONNECTION_STRING')`).
 
-1. **Authentication → Email Templates → Magic Link** (this is the template
-   `signInWithOtp(email:)` uses).
-2. Ensure the template body includes the token variable **`{{ .Token }}`**,
-   e.g. `Your Oneleven code is {{ .Token }}`. If the template only contains
-   `{{ .ConfirmationURL }}` (the default magic-link), the email will not carry
-   a 6-digit code and the code-entry step in `auth_screen.dart` cannot succeed.
-3. (Optional) Under **Authentication → Providers → Email**, keep "Enable email
-   provider" on; a password is not required for the OTP flow.
+Set the secret on the Supabase project before the flow will work at runtime,
+either from the dashboard (**Edge Functions → Manage secrets**) or the CLI:
 
-The client verifies with `verifyOTP(type: OtpType.email, ...)`, which expects
-the numeric token from `{{ .Token }}`. Magic-link click-through is **not** the
-flow used here.
+```sh
+supabase secrets set AZURE_ACS_CONNECTION_STRING="endpoint=https://oneleven.india.communication.azure.com/;accesskey=..."
+```
 
-### Live vs. mock
+- **ACS endpoint:** `https://oneleven.india.communication.azure.com`
+- **Verified sender:**
+  `DoNotReply@9492de8c-c56d-44f6-a797-24bc8fd6c182.azurecomm.net`
 
-**Live against Supabase (when reachable + signed in):**
+> ⚠️ **Never** put `AZURE_ACS_CONNECTION_STRING` (or any service_role key) in
+> the app, `lib/`, `pubspec.yaml`, the README, or the APK. It lives exclusively
+> in the Edge Function secrets.
 
-- Auth (email OTP sign-up / login / sign-out).
-- `profiles` — `ProfileRepository.currentUser` / `profiles` hydrate from the
-  `profiles` table; `updateProfile` persists `display_name` / `bio`.
-- `posts` — `PostRepository` hydrates from `posts` (joining `profiles` for the
-  author); composing a post inserts into `posts` with a **client-generated
-  UUID** (see `lib/utils/ids.dart`) sent as the row `id`, so the in-memory post
-  id and the DB row id are identical (a later like/repost on the just-composed
-  post targets the correct row instead of a not-yet-existing one).
-- `likes` — like toggles perform a fire-and-forget insert/delete on the
-  `likes` join table only. **`posts.like_count` is owned by the database:** an
-  `after insert or delete` trigger (`sync_post_like_count`) recomputes it from
-  `count(*)`, so concurrent clients cannot drift the count. The client never
-  writes `like_count` directly.
-- `reels` — the reel-compose flow uploads the video to the `reels` bucket and
-  inserts a first-class row into the **`reels` table** (`owner`, `video_url`,
-  `caption`) via `StorageService.insertReel`, then also surfaces the reel in
-  the timeline as a video post. Wiring a gallery/camera picker (the raw byte
-  source) is the only remaining step; the upload + DB write are real.
-- Storage — `StorageService.uploadAvatar` (bucket `avatars`) and
-  `StorageService.uploadReel` (bucket `reels`) via `uploadBinary` +
-  `getPublicUrl`.
+Because `verify-otp` sets `email_confirm` server-side and mints the session
+token itself, **Supabase's built-in email confirmation / magic-link template is
+no longer used for OTP**. There is nothing to configure under Authentication →
+Email Templates for this flow; the 6-digit code email comes entirely from ACS.
 
-> **`repost_count` limitation:** there is no `reposts` join table, so
-> `repost_count` is still written from the client (`_persistRepostCount`) and
-> can drift under concurrent clients (last-writer-wins). A production version
-> should add a `reposts` join table plus a trigger mirroring
-> `sync_post_like_count`. This is intentionally deferred to keep the schema
-> scope minimal for this pass (documented in `0001_init.sql` and the code).
+### Data layer (fully Supabase-backed)
 
-**Still mock (`lib/data/mock_data.dart`):**
+As of the data-layer rebuild there is **no `MockData` fallback**. Every
+repository is a `ChangeNotifier` singleton that starts empty in a
+`LoadStatus.idle` state (see `lib/data/load_status.dart`), loads from Supabase
+via `load()` after sign-in, and exposes a real `loading` / `loaded` / `error`
+status plus an empty-state (a `loaded` status with an empty cache is a genuine
+"no data yet", not an error). `main.dart`'s `AuthGate` calls `load()` on every
+repository after sign-in and `clear()` on sign-out, so a fresh login never
+shows a previous user's cache.
 
-- Notifications (`ProfileRepository.notifications()` / `unreadNotifications` /
-  `markNotificationsRead`) — no notifications table yet.
-- Conversations / direct messages (`conversations()` / `unreadMessages` /
-  `conversationById`) — no messaging table yet.
+- **Auth** — email OTP sign-up / login / sign-out.
+- **`profiles`** (`ProfileRepository`) — `currentUser` / `profiles` load from
+  the `profiles` table; `updateProfile` persists `display_name` / `bio`
+  (optimistic, reverts on failure). Real follow/unfollow via `toggleFollow`
+  (insert/delete in `follows`, never writing the DB-owned follower/following
+  counters), plus `isFollowing`, `followingIds`, `profileById`,
+  `profileByUsername`.
+- **`posts`** (`PostRepository`) — the main feed loads **top-level posts only**
+  (`parent_id is null`) joining `profiles` for the author, then hydrates the
+  current user's `liked` / `reposted` / `bookmarked` flags. `following()`
+  filters to authors the user actually follows (from the `follows` table).
+  Composing a post inserts into `posts` with a **client-generated UUID**
+  (`lib/utils/ids.dart`) so the in-memory id equals the DB row id.
+- **`likes` / `reposts` / `bookmarks`** — `toggleLike` / `toggleRepost` /
+  `toggleBookmark` are optimistic then insert/delete rows in the corresponding
+  join table, reverting the optimistic change and surfacing `lastError` on
+  failure. **The DB owns `like_count` / `repost_count` / `reply_count`**
+  (recompute-from-`count(*)` triggers); the client never writes those columns.
+- **Replies** — `replies(parentId)` loads child posts; `addReply` inserts a
+  `posts` row with `parent_id` set. The parent's `reply_count` is
+  trigger-maintained.
+- **Notifications** (`NotificationRepository`) — loads the current user's
+  `notifications` (joined to the actor profile), exposes `unreadNotifications`
+  and `markNotificationsRead`, and `createNotification(...)` is fired as a side
+  effect of like/reply/repost/follow (self-notifications are skipped per the
+  `actor <> recipient` RLS rule).
+- **Direct messages** (`MessageRepository`) — loads the conversations the user
+  participates in (with the other participant's profile and per-user unread),
+  `loadMessages`, `sendMessage`, `openOrCreateConversationWith`, and
+  `resetUnread`. `Message.fromMe` is derived by comparing `messages.sender` to
+  the current auth uid. `last_preview` / `updated_at` / `unread` are
+  trigger-maintained.
+- **`reels`** — the reel-compose flow picks a video with `image_picker`,
+  uploads it to the `reels` bucket, and inserts a first-class row into the
+  **`reels` table** via `StorageService.insertReel`, then surfaces the reel as a
+  video post.
+- **Storage** — `StorageService.uploadAvatar` (bucket `avatars`),
+  `StorageService.uploadReel` (bucket `reels`), and
+  `StorageService.uploadPostImage` (bucket `post-media`, for images attached to
+  posts).
 
-**Graceful fallback:** the repositories seed their in-memory caches from
-`MockData` at construction and hydrate from Supabase asynchronously
-(fire-and-forget, guarded). If Supabase is uninitialized, unreachable, or the
-user is signed out, the queries are caught and the app keeps showing mock data
-instead of failing. This same fallback is what lets the unit tests
-(which never boot Supabase) run against `PostRepository()` / `ProfileRepository()`.
+### Backend schema extension — `0002_backend.sql` / `0003_harden_functions.sql`
+
+The initial `0001_init.sql` covered `profiles`, `posts`, `reels`, `likes`,
+`follows`. `0002_backend.sql` extends the backend so the previously mock-only
+features have real tables, and `0003_harden_functions.sql` locks down the
+`SECURITY DEFINER` trigger functions (revokes their RPC `EXECUTE` so they can
+only run from their triggers, clearing the database-linter warnings). Added:
+
+- **Replies** — `posts.parent_id` (self-referencing FK); a trigger
+  (`sync_post_reply_count`) keeps `posts.reply_count` server-authoritative.
+- **Reposts** — `reposts` join table + `sync_post_repost_count` trigger.
+- **Bookmarks** — `bookmarks` join table (**private:** owner-scoped SELECT), so
+  `Post.bookmarked` can persist per user.
+- **Follower/following counts** — `sync_follow_counts` trigger keeps
+  `profiles.followers` / `profiles.following` in sync from `follows`.
+- **Notifications** — `notifications` table + `notification_type` enum
+  (`like`/`reply`/`repost`/`follow`/`mention`), recipient-scoped RLS.
+- **Direct messages** — `conversations`, `conversation_participants`, and
+  `messages` tables with participant-scoped RLS (via the
+  `is_conversation_participant` helper). A `handle_new_message` trigger updates
+  the conversation preview/`updated_at` and bumps each recipient's `unread`.
+
+All tables have RLS enabled. The migrations have been applied to the hosted
+Oneleven project and verified end-to-end (new-user, like/reply/repost/follow
+counters, and message unread all confirmed via a smoke test).
+
+### Data-layer extension — `0004`–`0006`
+
+`0004_search_realtime_indexes.sql` adds the search + realtime plumbing the
+Supabase-backed data layer needs: a `pg_trgm` extension (in the `extensions`
+schema) with GIN trigram indexes on `profiles.username` / `profiles.display_name`
+/ `posts.content`; two `SECURITY INVOKER` search RPCs (`search_profiles`,
+`search_posts`, both with a fixed `search_path` and granted to `authenticated`
+only); FK-covering indexes on `likes` / `reposts` / `bookmarks` (`post_id`),
+`follows` (`followee`), `messages` (`sender`), and `notifications`
+(`actor` / `post_id`); and membership of `posts`, `messages`, `notifications`,
+`conversations`, and `conversation_participants` in the `supabase_realtime`
+publication.
+
+`0005_optimize_rls_initplan.sql` addresses the performance advisor: it wraps
+`auth.uid()` in `(select auth.uid())` across every RLS policy (so it is
+evaluated once per statement rather than once per row) and adds a covering
+index on `reels.owner`.
+
+`0006_profile_embed_fkeys.sql` adds foreign keys from `posts.owner`,
+`notifications.actor`, `conversation_participants.user_id`, and
+`messages.sender` to `public.profiles(id)` (alongside the existing
+`auth.users(id)` FKs) so PostgREST can embed the author/actor/participant
+profile (`select('*, profiles(*)')`).
+
+After each DDL change the security and performance advisors were re-run. The
+remaining findings are pre-existing and justified: the `is_conversation_participant`
+and Supabase-managed `rls_auto_enable` `SECURITY DEFINER` warnings (the former
+must stay `EXECUTE`-able by `authenticated` because it is used inside RLS
+policies), and `unused_index` INFO notices (expected while the tables are still
+empty; the indexes back queries the app issues at runtime).
+
+**Unit tests** were rewritten for the no-mock architecture. The old tests
+depended on the deleted `MockData` seed; they now exercise the offline-safe
+surface of the repositories (initial `idle` / empty state, unknown-id toggles
+returning null, `clear()`) plus the pure row -> model mapping in
+`lib/data/mappers.dart` (see the **Tests** section). The Supabase-dependent
+paths (`load`, `replies`, DM send, notifications) are verified manually / via
+the MCP tooling because the tests never boot a Supabase client.
 
 ### Media upload note
 
-To keep the dependency surface minimal, **no image/file-picker package is
-bundled**. `StorageService` provides the upload helpers, and there are clearly
-marked scaffold call sites (`compose_screen.dart` for reels,
-`profile_screen.dart` for avatars). The **only** missing piece is the raw byte
-source (gallery/camera). For reels the rest of the flow is real: once bytes are
-supplied, `_uploadReel` uploads to the `reels` bucket, inserts a row into the
-`reels` table (`StorageService.insertReel`), and surfaces the reel as a video
-post; no picker means it is not yet triggered from a button.
+Media picking is now **fully wired** with the [`image_picker`](https://pub.dev/packages/image_picker)
+package (`^1.1.2`), so the previous byte-source seam is closed:
+
+- **Avatar** (`profile_screen.dart`) — tapping the current user's profile photo
+  opens the gallery, uploads the picked image via `StorageService.uploadAvatar`
+  (bucket `avatars`), and persists the returned public URL onto
+  `profiles.avatar_url` through `ProfileRepository.updateProfile(avatarUrl:)`,
+  then reloads the profile.
+- **Post image** (`compose_screen.dart`) — the media button offers a photo
+  (gallery or camera); the picked image is previewed, then uploaded to the
+  dedicated public **`post-media`** bucket via
+  `StorageService.uploadPostImage` on Post, and the post row is created with
+  `media_url` + `media_type = image`.
+- **Reel video** (`compose_screen.dart`) — picking a video (gallery) uploads it
+  to the `reels` bucket, inserts a first-class row into the `reels` table
+  (`StorageService.insertReel`), and surfaces it as a video post.
+
+The `post-media` bucket is created by `supabase/migrations/0008_post_media_bucket.sql`
+with owner-scoped write RLS (objects keyed `<userId>/<file>`) mirroring the
+`avatars` / `reels` buckets; reads are public via the CDN. Android permissions
+for camera capture (`CAMERA`) and Android 13+ media reads
+(`READ_MEDIA_IMAGES` / `READ_MEDIA_VIDEO`) are declared in the manifest.
 
 ## Tests
 
-Pure logic is covered by unit tests under `test/` (run with `flutter test`):
+Pure, network-independent logic is covered by unit tests under `test/` (run
+with `flutter test`). Because the repositories are now fully Supabase-backed
+with no mock fallback, the tests never boot a client; they target only pure /
+synchronous logic:
 
-- `test/format_test.dart` — `fmtCount` K/M/B thresholds and trailing-`.0` trimming; `timeAgo` buckets (`now` / `m` / `h` / `d` / short date).
-- `test/post_repository_test.dart` — `forYou` ordering, `following` filtering, `toggleLike` / `toggleRepost` / `toggleBookmark` flipping state and adjusting counts, and `addPost` prepending.
-- `test/profile_repository_test.dart` — notification/conversation ordering, unread counts, `markNotificationsRead`, and `updateProfile`.
+- `test/format_test.dart` — `fmtCount` K/M/B thresholds and trailing-`.0` trimming; `timeAgo` buckets (`now` / `m` / `h` / `d` / short date). Unchanged.
+- `test/mappers_test.dart` — the pure row -> model helpers in `lib/data/mappers.dart`: `asInt` / `parseDate` coercion, `mediaTypeFromName` / `notificationTypeFromName` enum mapping, `profileFromRow` (including the unknown-profile fallback), `postFromRow` (joined author + DB-owned counters, never deriving engagement flags), `notificationFromRow`, and `messageFromRow` **`fromMe` derivation** (sender vs current uid, including signed-out).
+- `test/post_repository_test.dart` — the offline-safe `PostRepository` surface: it starts `idle` with empty `forYou` / `following`, returns unmodifiable views, `toggleLike` / `toggleRepost` / `toggleBookmark` return null for an unknown id without touching the network, and `clear()` resets and notifies.
+- `test/profile_repository_test.dart` — the offline-safe `ProfileRepository` surface: `idle` with no `currentUser` / empty `profiles`, `isFollowing` false before loading, unmodifiable `profiles` view, and `clear()`.
 
-Like the rest of the project, these were authored by hand and have not been executed in-sandbox (no Dart toolchain); run `flutter test` on a Flutter-equipped machine.
+`MockData` was removed, so no test references `package:oneleven/data/mock_data.dart`. Like the rest of the project, these tests were authored by hand and have **not** been executed in-sandbox (no Dart toolchain); run `flutter test` on a Flutter-equipped machine, which is the source of truth.
 
 ## Dependencies
 

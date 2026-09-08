@@ -4,15 +4,17 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../supabase_config.dart';
 
-/// Thin wrapper over Supabase Storage for the app's two public buckets:
-/// `avatars` (profile images) and `reels` (short videos), both created by
-/// `supabase/migrations/0001_init.sql`.
+/// Thin wrapper over Supabase Storage for the app's public buckets:
+/// `avatars` (profile images), `reels` (short videos), and `post-media`
+/// (images attached to posts). `avatars` / `reels` are created by
+/// `supabase/migrations/0001_init.sql`; `post-media` by
+/// `supabase/migrations/0008_post_media_bucket.sql`.
 ///
 /// Objects are keyed by `<userId>/<file>` so the per-object owner RLS policies
-/// in the migration allow a user to overwrite only their own files. Callers
-/// supply the raw bytes; picking bytes from the device gallery/camera is left
-/// to the call site (no image/file-picker dependency is bundled - see the
-/// TODO/scaffold call sites in `compose_screen.dart` and `profile_screen.dart`).
+/// in the migrations allow a user to overwrite only their own files. Callers
+/// supply the raw bytes; the byte source (gallery/camera) is wired at the call
+/// sites via `image_picker` (see `compose_screen.dart` and
+/// `profile_screen.dart`).
 ///
 /// Reel metadata (owner, video_url, caption) is persisted into the first-class
 /// `public.reels` table via [insertReel]; the `reels` bucket holds only the
@@ -44,9 +46,6 @@ abstract final class StorageService {
   /// [insertReel] with the returned URL to persist it there. The compose reel
   /// flow (`compose_screen.dart`) does both, so the `reels` table is the real
   /// home for reel metadata rather than dead schema.
-  ///
-  /// Scaffolded only in that a byte source (gallery/camera picker) is not
-  /// bundled; the upload + DB write themselves are real.
   static Future<String> uploadReel({
     required String userId,
     required Uint8List bytes,
@@ -54,6 +53,29 @@ abstract final class StorageService {
   }) async {
     const bucket = 'reels';
     // A unique key per upload so multiple reels per user do not collide.
+    final path = '$userId/${DateTime.now().millisecondsSinceEpoch}.$ext';
+    await supabase.storage.from(bucket).uploadBinary(
+          path,
+          bytes,
+          fileOptions: const FileOptions(upsert: true),
+        );
+    return supabase.storage.from(bucket).getPublicUrl(path);
+  }
+
+  /// Uploads an image attached to a post for the current user and returns its
+  /// public URL. Store the returned URL on `posts.media_url` (with
+  /// `media_type = 'image'`).
+  ///
+  /// Uses the dedicated public `post-media` bucket (see
+  /// `supabase/migrations/0008_post_media_bucket.sql`) so post images are kept
+  /// separate from `avatars` and `reels`. A unique key per upload lets a user
+  /// attach many images without collisions.
+  static Future<String> uploadPostImage({
+    required String userId,
+    required Uint8List bytes,
+    String ext = 'jpg',
+  }) async {
+    const bucket = 'post-media';
     final path = '$userId/${DateTime.now().millisecondsSinceEpoch}.$ext';
     await supabase.storage.from(bucket).uploadBinary(
           path,

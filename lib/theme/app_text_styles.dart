@@ -36,6 +36,27 @@ abstract final class AppTextStyles {
     GoogleFonts.config.allowRuntimeFetching = true;
   }
 
+  /// X-style big, bold, left-aligned screen headline (e.g. the welcome
+  /// "See what's happening", "Enter your email address" auth prompts, and
+  /// large profile/empty-state headings). Chirp-like extra-bold at a large
+  /// size with tight leading.
+  static TextStyle get headline => GoogleFonts.inter(
+        fontSize: 31,
+        height: 1.12,
+        fontWeight: FontWeight.w800,
+        letterSpacing: -0.4,
+        color: AppColors.primaryText,
+      ).copyWith(fontFamilyFallback: _fallback);
+
+  /// Supporting subtitle shown under a [headline] (e.g. "We'll send you a
+  /// verification code"). Muted secondary text at body scale.
+  static TextStyle get subtitle => GoogleFonts.inter(
+        fontSize: 15,
+        height: 1.35,
+        fontWeight: FontWeight.w400,
+        color: AppColors.secondaryText,
+      ).copyWith(fontFamilyFallback: _fallback);
+
   /// Large display / headline (e.g. profile name on header).
   static TextStyle get display => GoogleFonts.inter(
         fontSize: 22,
@@ -97,6 +118,8 @@ abstract final class AppTextStyles {
     return TextTheme(
       displayLarge: display,
       displayMedium: display,
+      headlineLarge: headline,
+      headlineMedium: headline,
       titleLarge: title,
       titleMedium: name,
       bodyLarge: body,

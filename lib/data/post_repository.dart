@@ -1,202 +1,569 @@
 import 'package:flutter/foundation.dart';
 
+import '../models/notification_item.dart';
 import '../models/post.dart';
 import '../models/user_profile.dart';
 import '../supabase_config.dart';
-import 'mock_data.dart';
+import '../utils/ids.dart';
+import 'load_status.dart';
+import 'mappers.dart' as mappers;
+import 'notification_repository.dart';
 
-/// The post store for the app, backed by Supabase.
+/// The post store for the app, fully backed by Supabase (no mock fallback).
 ///
-/// Uses [ChangeNotifier] so screens can listen for updates without pulling in
-/// a state-management package. The public surface is deliberately synchronous
-/// (`forYou`, `following`, the `toggle*` mutators, `addPost`) and reads from an
-/// in-memory `_posts` cache. That cache is:
+/// A [ChangeNotifier] singleton (`PostRepository.instance`) so screens listen
+/// via `AnimatedBuilder(animation: PostRepository.instance)`. The cache starts
+/// empty with [status] == [LoadStatus.idle]; call [load] after sign-in to fill
+/// it and [clear] on sign-out. [status] exposes the real loading/loaded/error
+/// state so the UI can render spinners, empty states, and errors instead of
+/// fabricated data.
 ///
-///  * seeded from [MockData.posts] at construction so the UI (and the unit
-///    tests, which never boot Supabase) always have data immediately, and
-///  * hydrated asynchronously from Supabase via [load], called fire-and-forget
-///    from the constructor. `load` is fully guarded: if Supabase is not
-///    initialized (e.g. under `flutter test`) or the query fails, it silently
-///    keeps the mock seed and does NOT notify, so it can never interfere with
-///    the synchronous, single-notify behavior the tests assert.
-///
-/// Mutations (`toggleLike`, `toggleRepost`, `addPost`) update the cache
-/// optimistically and fire exactly one [notifyListeners]; the Supabase write is
-/// a separate fire-and-forget helper that never throws into the UI.
+/// Engagement mutations (`toggleLike`, `toggleRepost`, `toggleBookmark`) update
+/// the cache optimistically for a snappy UI, then write to the corresponding
+/// join table (`likes` / `reposts` / `bookmarks`). On failure they revert the
+/// optimistic change and surface it via [lastError]. The DB-owned counters
+/// (`like_count` / `repost_count` / `reply_count`) are trigger-maintained and
+/// are NEVER written from the client.
 class PostRepository extends ChangeNotifier {
-  PostRepository() : _posts = MockData.posts() {
-    // Hydrate from Supabase in the background. Guarded so it is a no-op when
-    // Supabase is unavailable (tests / offline), leaving the mock seed intact.
-    // ignore: discarded_futures
-    load();
-  }
+  PostRepository();
 
   /// Shared singleton for the app.
   static final PostRepository instance = PostRepository();
 
-  final List<Post> _posts;
+  final List<Post> _posts = <Post>[];
+  final List<Post> _followingPosts = <Post>[];
+  final Set<String> _followingIds = <String>{};
+  LoadStatus _status = LoadStatus.idle;
+  LoadStatus _followingStatus = LoadStatus.idle;
+  Object? _error;
+  Object? _followingError;
+  Object? _lastError;
 
-  /// The "For you" timeline (all posts, newest first).
+  /// The current load state of the timeline.
+  LoadStatus get status => _status;
+
+  /// The most recent load error, if [status] is [LoadStatus.error].
+  Object? get error => _error;
+
+  /// The most recent mutation error (e.g. a failed like), for surfacing a
+  /// transient message. Cleared at the start of each mutation.
+  Object? get lastError => _lastError;
+
+  /// The set of author ids the current user follows (populated by [load] /
+  /// [loadFollowing]).
+  Set<String> get followingIds => Set<String>.unmodifiable(_followingIds);
+
+  /// The "For you" timeline (all top-level posts, newest first).
   List<Post> forYou() {
-    final list = List<Post>.of(_posts);
-    list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    final list = List<Post>.of(_posts)
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
     return List<Post>.unmodifiable(list);
   }
 
-  /// The "Following" timeline (a subset by author).
+  /// The current load state of the Following timeline.
+  LoadStatus get followingStatus => _followingStatus;
+
+  /// The most recent Following-timeline load error, if any.
+  Object? get followingError => _followingError;
+
+  /// The "Following" timeline: top-level posts by authors the current user
+  /// follows, newest first. Backed by a dedicated query (see [loadFollowingFeed])
+  /// so followed authors whose posts fall outside the For-You fetch still show.
   List<Post> following() {
-    final followedIds = MockData.followingPosts().map((p) => p.author.id).toSet();
-    final list = _posts.where((p) => followedIds.contains(p.author.id)).toList();
-    list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    // Overlay live toggle state from the For-You cache when the same post is
+    // present there, so a like/repost in one tab reflects in the other.
+    final list = _followingPosts
+        .map((p) => postById(p.id) ?? p)
+        .toList()
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
     return List<Post>.unmodifiable(list);
   }
 
-  /// Hydrates [_posts] from Supabase. Fire-and-forget; fully guarded so it
-  /// never throws (e.g. when Supabase is uninitialized under tests) and only
-  /// notifies when it actually replaces the cache with live rows.
+  /// Loads the main feed (top-level posts only, replies excluded) from
+  /// Supabase, then hydrates the current user's follow set and engagement
+  /// flags. Sets [status] and notifies in every outcome. Never throws.
   Future<void> load() async {
+    _status = LoadStatus.loading;
+    _error = null;
+    notifyListeners();
     try {
       final rows = await supabase
           .from('posts')
           .select('*, profiles(*)')
+          .isFilter('parent_id', null)
           .order('created_at', ascending: false);
       final data = (rows as List).cast<Map<String, dynamic>>();
-      if (data.isEmpty) return; // keep the mock seed as a graceful fallback
-      final mapped = data.map(_postFromRow).toList();
       _posts
         ..clear()
-        ..addAll(mapped);
+        ..addAll(data.map(_postFromRow));
+
+      await loadFollowing();
+      await _hydrateEngagement();
+
+      _status = LoadStatus.loaded;
       notifyListeners();
+
+      // Load the Following timeline with its own dedicated query so it is
+      // authoritative rather than a filtered view of the For-You cache.
+      await loadFollowingFeed();
+    } catch (e) {
+      _error = e;
+      _status = LoadStatus.error;
+      notifyListeners();
+    }
+  }
+
+  /// Loads the Following timeline: top-level posts whose owner is in the
+  /// current user's follow set, newest first, joined to the author profile.
+  /// Uses its own query (not the For-You cache) so a followed author's older
+  /// posts still appear. Sets [followingStatus] and notifies in every outcome.
+  /// Never throws into the UI.
+  Future<void> loadFollowingFeed() async {
+    _followingStatus = LoadStatus.loading;
+    _followingError = null;
+    notifyListeners();
+    try {
+      // Refresh the follow set first so a manual refresh (and follows made
+      // since the last full load) are reflected authoritatively.
+      await loadFollowing();
+      final myId = supabase.auth.currentUser?.id;
+      if (myId == null || _followingIds.isEmpty) {
+        _followingPosts.clear();
+        _followingStatus = LoadStatus.loaded;
+        notifyListeners();
+        return;
+      }
+      final rows = await supabase
+          .from('posts')
+          .select('*, profiles(*)')
+          .isFilter('parent_id', null)
+          .inFilter('owner', _followingIds.toList())
+          .order('created_at', ascending: false);
+      final data = (rows as List).cast<Map<String, dynamic>>();
+      final posts = data.map(_postFromRow).toList();
+      _applyEngagementFlags(posts);
+      _followingPosts
+        ..clear()
+        ..addAll(posts);
+      _followingStatus = LoadStatus.loaded;
+      notifyListeners();
+    } catch (e) {
+      _followingError = e;
+      _followingStatus = LoadStatus.error;
+      notifyListeners();
+    }
+  }
+
+  /// Loads (into [_followingIds]) the set of author ids the current user
+  /// follows. Safe to call independently; guarded.
+  Future<void> loadFollowing() async {
+    try {
+      final myId = supabase.auth.currentUser?.id;
+      if (myId == null) {
+        _followingIds.clear();
+        return;
+      }
+      final rows = await supabase
+          .from('follows')
+          .select('followee')
+          .eq('follower', myId);
+      final data = (rows as List).cast<Map<String, dynamic>>();
+      _followingIds
+        ..clear()
+        ..addAll(
+          data
+              .map((r) => r['followee']?.toString() ?? '')
+              .where((id) => id.isNotEmpty),
+        );
     } catch (_) {
-      // Supabase unavailable/unauthenticated or query failed: keep the mock
-      // seed. Never throw into construction or the UI.
+      // Leave the current set; following() simply shows what we know.
+    }
+  }
+
+  /// Hydrates `liked` / `reposted` / `bookmarked` flags on the cached posts
+  /// from the current user's rows in `likes` / `reposts` / `bookmarks`.
+  Future<void> _hydrateEngagement() async {
+    final myId = supabase.auth.currentUser?.id;
+    if (myId == null) return;
+    try {
+      final likeRows = await supabase
+          .from('likes')
+          .select('post_id')
+          .eq('user_id', myId);
+      final repostRows = await supabase
+          .from('reposts')
+          .select('post_id')
+          .eq('user_id', myId);
+      final bookmarkRows = await supabase
+          .from('bookmarks')
+          .select('post_id')
+          .eq('user_id', myId);
+
+      final liked = _idSet(likeRows);
+      final reposted = _idSet(repostRows);
+      final bookmarked = _idSet(bookmarkRows);
+
+      for (var i = 0; i < _posts.length; i++) {
+        final p = _posts[i];
+        _posts[i] = p.copyWith(
+          liked: liked.contains(p.id),
+          reposted: reposted.contains(p.id),
+          bookmarked: bookmarked.contains(p.id),
+        );
+      }
+    } catch (_) {
+      // Keep whatever flags mapped from the rows; not fatal.
     }
   }
 
   int _indexOf(String id) => _posts.indexWhere((p) => p.id == id);
 
-  /// Toggles the like state and count. Returns the updated post, or null.
-  Post? toggleLike(String id) {
+  /// Toggles the like state, writing to the `likes` join table. Optimistic;
+  /// reverts and records [lastError] on failure. Returns the updated post or
+  /// null for an unknown id.
+  Future<Post?> toggleLike(String id) async {
+    _lastError = null;
     final i = _indexOf(id);
     if (i < 0) return null;
-    final current = _posts[i];
-    final nowLiked = !current.liked;
-    final updated = current.copyWith(
+    final original = _posts[i];
+    final nowLiked = !original.liked;
+    final optimistic = original.copyWith(
       liked: nowLiked,
-      likeCount: current.likeCount + (nowLiked ? 1 : -1),
+      likeCount: original.likeCount + (nowLiked ? 1 : -1),
     );
-    _posts[i] = updated;
+    _posts[i] = optimistic;
     notifyListeners();
-    // Persist in the background; never blocks or throws into the UI.
-    // ignore: discarded_futures
-    _persistLike(updated);
-    return updated;
-  }
 
-  /// Toggles the repost state and count. Returns the updated post, or null.
-  Post? toggleRepost(String id) {
-    final i = _indexOf(id);
-    if (i < 0) return null;
-    final current = _posts[i];
-    final nowReposted = !current.reposted;
-    final updated = current.copyWith(
-      reposted: nowReposted,
-      repostCount: current.repostCount + (nowReposted ? 1 : -1),
-    );
-    _posts[i] = updated;
-    notifyListeners();
-    // ignore: discarded_futures
-    _persistRepostCount(updated);
-    return updated;
-  }
-
-  /// Toggles the bookmark state. Returns the updated post, or null.
-  ///
-  /// Bookmarks are a local-only affordance (no bookmarks table in the schema),
-  /// so this stays in-memory and does not persist.
-  Post? toggleBookmark(String id) {
-    final i = _indexOf(id);
-    if (i < 0) return null;
-    final current = _posts[i];
-    final updated = current.copyWith(bookmarked: !current.bookmarked);
-    _posts[i] = updated;
-    notifyListeners();
-    return updated;
-  }
-
-  /// Adds a new post to the top of the timeline (compose flow) and persists it.
-  void addPost(Post post) {
-    _posts.insert(0, post);
-    notifyListeners();
-    // ignore: discarded_futures
-    _persistNewPost(post);
-  }
-
-  // -- Supabase persistence (fire-and-forget, fully guarded) ---------------
-
-  /// Reflects a like toggle into the `likes` join table only.
-  ///
-  /// The `posts.like_count` counter is owned by the database: an
-  /// `after insert or delete` trigger on `likes` recomputes it from
-  /// `count(*)` (see `sync_post_like_count` in `0001_init.sql`). The client
-  /// deliberately does NOT write `like_count` here, which would race with
-  /// concurrent clients and drift from the true like set; it only records the
-  /// user's like/unlike and lets the server reconcile the count. The local
-  /// optimistic count remains a display-only estimate until the next [load].
-  /// No-op/guarded when Supabase is unavailable.
-  Future<void> _persistLike(Post post) async {
     try {
       final userId = supabase.auth.currentUser?.id;
-      if (userId == null) return;
-      if (post.liked) {
+      if (userId == null) throw StateError('Not signed in');
+      if (nowLiked) {
         await supabase.from('likes').insert(<String, dynamic>{
           'user_id': userId,
-          'post_id': post.id,
+          'post_id': id,
         });
+        await NotificationRepository.instance.createNotification(
+          recipient: original.author.id,
+          type: NotificationType.like,
+          postId: id,
+          preview: _previewOf(original),
+        );
       } else {
         await supabase
             .from('likes')
             .delete()
             .eq('user_id', userId)
-            .eq('post_id', post.id);
+            .eq('post_id', id);
       }
-    } catch (_) {
-      // Ignore persistence failures; the optimistic in-memory state stands.
+      return optimistic;
+    } catch (e) {
+      _revert(id, original);
+      _lastError = e;
+      notifyListeners();
+      return null;
     }
   }
 
-  /// Reflects a repost toggle into the post's `repost_count`.
-  ///
-  /// Known limitation: unlike likes, there is no `reposts` join table, so this
-  /// counter is client-authoritative and can drift under concurrent clients
-  /// (last-writer-wins). A production version should add a `reposts` join
-  /// table plus a trigger mirroring `sync_post_like_count`, and stop writing
-  /// `repost_count` from the client. Kept as-is for this pass to avoid
-  /// expanding the schema/scope; documented in the migration and README.
-  Future<void> _persistRepostCount(Post post) async {
-    try {
-      await supabase
-          .from('posts')
-          .update(<String, dynamic>{'repost_count': post.repostCount})
-          .eq('id', post.id);
-    } catch (_) {
-      // Ignore persistence failures.
-    }
-  }
+  /// Toggles the repost state, writing to the `reposts` join table (NOT the
+  /// `repost_count` counter, which the DB owns). Optimistic; reverts on
+  /// failure.
+  Future<Post?> toggleRepost(String id) async {
+    _lastError = null;
+    final i = _indexOf(id);
+    if (i < 0) return null;
+    final original = _posts[i];
+    final nowReposted = !original.reposted;
+    final optimistic = original.copyWith(
+      reposted: nowReposted,
+      repostCount: original.repostCount + (nowReposted ? 1 : -1),
+    );
+    _posts[i] = optimistic;
+    notifyListeners();
 
-  /// Inserts a newly composed post into the `posts` table.
-  ///
-  /// The `id` is sent explicitly (not left to the DB default) so the persisted
-  /// row's primary key equals the in-memory [Post.id]. Callers generate that
-  /// id with `newUuidV4()` (see `utils/ids.dart`, used in
-  /// `compose_screen.dart`), which the `uuid primary key` column accepts as a
-  /// valid UUID. This keeps local and
-  /// server ids identical, so a subsequent per-id write (e.g. a like on the
-  /// just-composed post) targets the correct row instead of a nonexistent one.
-  Future<void> _persistNewPost(Post post) async {
     try {
       final userId = supabase.auth.currentUser?.id;
-      if (userId == null) return;
+      if (userId == null) throw StateError('Not signed in');
+      if (nowReposted) {
+        await supabase.from('reposts').insert(<String, dynamic>{
+          'user_id': userId,
+          'post_id': id,
+        });
+        await NotificationRepository.instance.createNotification(
+          recipient: original.author.id,
+          type: NotificationType.repost,
+          postId: id,
+          preview: _previewOf(original),
+        );
+      } else {
+        await supabase
+            .from('reposts')
+            .delete()
+            .eq('user_id', userId)
+            .eq('post_id', id);
+      }
+      return optimistic;
+    } catch (e) {
+      _revert(id, original);
+      _lastError = e;
+      notifyListeners();
+      return null;
+    }
+  }
+
+  /// Toggles the bookmark state, writing to the private `bookmarks` table.
+  /// Optimistic; reverts on failure.
+  Future<Post?> toggleBookmark(String id) async {
+    _lastError = null;
+    final i = _indexOf(id);
+    if (i < 0) return null;
+    final original = _posts[i];
+    final optimistic = original.copyWith(bookmarked: !original.bookmarked);
+    _posts[i] = optimistic;
+    notifyListeners();
+
+    try {
+      final userId = supabase.auth.currentUser?.id;
+      if (userId == null) throw StateError('Not signed in');
+      if (optimistic.bookmarked) {
+        await supabase.from('bookmarks').insert(<String, dynamic>{
+          'user_id': userId,
+          'post_id': id,
+        });
+      } else {
+        await supabase
+            .from('bookmarks')
+            .delete()
+            .eq('user_id', userId)
+            .eq('post_id', id);
+      }
+      return optimistic;
+    } catch (e) {
+      _revert(id, original);
+      _lastError = e;
+      notifyListeners();
+      return null;
+    }
+  }
+
+  /// Returns the cached top-level post with [id], or null if not loaded.
+  Post? postById(String id) {
+    final i = _indexOf(id);
+    return i < 0 ? null : _posts[i];
+  }
+
+  /// Fetches a single post by [id] (joining the author profile), preferring
+  /// the in-memory cache when present so engagement flags stay consistent.
+  /// Used to open a post detail from a notification whose post may not be in
+  /// the feed cache. Returns null when missing or on failure.
+  Future<Post?> fetchPostById(String id) async {
+    final cached = postById(id);
+    if (cached != null) return cached;
+    try {
+      final row = await supabase
+          .from('posts')
+          .select('*, profiles(*)')
+          .eq('id', id)
+          .maybeSingle();
+      if (row == null) return null;
+      final posts = <Post>[_postFromRow(row)];
+      _applyEngagementFlags(posts);
+      return posts.first;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Fetches the top-level posts authored by [ownerId] (newest first), joining
+  /// the author profile. Used by the profile screen for any user. Returns an
+  /// empty list on failure.
+  Future<List<Post>> postsByOwner(String ownerId) async {
+    try {
+      final rows = await supabase
+          .from('posts')
+          .select('*, profiles(*)')
+          .eq('owner', ownerId)
+          .isFilter('parent_id', null)
+          .order('created_at', ascending: false);
+      final data = (rows as List).cast<Map<String, dynamic>>();
+      final posts = data.map(_postFromRow).toList();
+      _applyEngagementFlags(posts);
+      return posts;
+    } catch (_) {
+      return const <Post>[];
+    }
+  }
+
+  /// Fetches the current user's bookmarked posts (newest bookmark first),
+  /// joining the author profile. Returns an empty list on failure.
+  Future<List<Post>> bookmarkedPosts() async {
+    try {
+      final myId = supabase.auth.currentUser?.id;
+      if (myId == null) return const <Post>[];
+      final rows = await supabase
+          .from('bookmarks')
+          .select('created_at, posts(*, profiles(*))')
+          .eq('user_id', myId)
+          .order('created_at', ascending: false);
+      final data = (rows as List).cast<Map<String, dynamic>>();
+      final posts = <Post>[];
+      for (final row in data) {
+        final postRow = row['posts'];
+        if (postRow is Map) {
+          final p = _postFromRow(postRow.cast<String, dynamic>());
+          posts.add(p.copyWith(bookmarked: true));
+        }
+      }
+      _applyEngagementFlags(posts, forceBookmarked: true);
+      return posts;
+    } catch (_) {
+      return const <Post>[];
+    }
+  }
+
+  /// Overlays the cached engagement flags (liked/reposted/bookmarked) onto a
+  /// freshly fetched list where the cache already knows the post, so
+  /// off-feed lists (profile, bookmarks) render the correct toggle state.
+  void _applyEngagementFlags(List<Post> posts, {bool forceBookmarked = false}) {
+    for (var i = 0; i < posts.length; i++) {
+      final cached = postById(posts[i].id);
+      if (cached != null) {
+        posts[i] = posts[i].copyWith(
+          liked: cached.liked,
+          reposted: cached.reposted,
+          bookmarked: forceBookmarked ? true : cached.bookmarked,
+        );
+      }
+    }
+  }
+
+  /// Returns the replies to [parentId] (posts whose `parent_id` is [parentId]),
+  /// oldest first, with their authors joined. Returns an empty list on failure.
+  Future<List<Post>> replies(String parentId) async {
+    try {
+      final rows = await supabase
+          .from('posts')
+          .select('*, profiles(*)')
+          .eq('parent_id', parentId)
+          .order('created_at', ascending: true);
+      final data = (rows as List).cast<Map<String, dynamic>>();
+      return data.map(_postFromRow).toList(growable: false);
+    } catch (_) {
+      return const <Post>[];
+    }
+  }
+
+  /// Searches posts by content via the `search_posts` RPC (case-insensitive
+  /// trigram / hashtag text match). The RPC returns bare `posts` rows without
+  /// the joined author, so this resolves each distinct owner from the
+  /// `profiles` table and attaches it. Returns an empty list on failure or for
+  /// a blank query.
+  Future<List<Post>> searchPosts(String query) async {
+    final q = query.trim();
+    if (q.isEmpty) return const <Post>[];
+    try {
+      final rows = await supabase.rpc(
+        'search_posts',
+        params: <String, dynamic>{'q': q},
+      );
+      final data = (rows as List).cast<Map<String, dynamic>>();
+      if (data.isEmpty) return const <Post>[];
+
+      // Resolve authors for the distinct owners in a single query.
+      final ownerIds = data
+          .map((r) => r['owner']?.toString() ?? '')
+          .where((id) => id.isNotEmpty)
+          .toSet()
+          .toList();
+      final authors = <String, UserProfile>{};
+      if (ownerIds.isNotEmpty) {
+        final profileRows = await supabase
+            .from('profiles')
+            .select()
+            .inFilter('id', ownerIds);
+        final profiles = (profileRows as List).cast<Map<String, dynamic>>();
+        for (final row in profiles) {
+          final author = _authorFromRow(row);
+          if (author.id.isNotEmpty) authors[author.id] = author;
+        }
+      }
+
+      final posts = <Post>[];
+      for (final row in data) {
+        final ownerId = row['owner']?.toString() ?? '';
+        final author = authors[ownerId] ??
+            const UserProfile(id: '', username: 'user', displayName: 'User');
+        posts.add(_postFromRowWithAuthor(row, author));
+      }
+      _applyEngagementFlags(posts);
+      return posts;
+    } catch (_) {
+      return const <Post>[];
+    }
+  }
+
+  /// Adds a reply to [parentId] with [content], owned by the current user.
+  /// Inserts a `posts` row with `parent_id` set and a client-generated UUID so
+  /// the returned [Post.id] equals the persisted row id. The parent's
+  /// `reply_count` is DB-owned (sync_post_reply_count trigger). Also creates a
+  /// reply notification for the parent's owner. Returns the mapped reply or
+  /// null on failure.
+  Future<Post?> addReply({
+    required String parentId,
+    required String content,
+  }) async {
+    final trimmed = content.trim();
+    if (trimmed.isEmpty) return null;
+    try {
+      final userId = supabase.auth.currentUser?.id;
+      if (userId == null) return null;
+      final id = newUuidV4();
+      final inserted = await supabase
+          .from('posts')
+          .insert(<String, dynamic>{
+            'id': id,
+            'owner': userId,
+            'content': trimmed,
+            'parent_id': parentId,
+          })
+          .select('*, profiles(*)')
+          .single();
+      final reply = _postFromRow(inserted);
+
+      // Bump the cached parent's reply_count optimistically if present.
+      final pi = _indexOf(parentId);
+      Post? parent;
+      if (pi >= 0) {
+        parent = _posts[pi];
+        _posts[pi] = parent.copyWith(replyCount: parent.replyCount + 1);
+        notifyListeners();
+      }
+
+      final parentOwner = parent?.author.id;
+      if (parentOwner != null) {
+        await NotificationRepository.instance.createNotification(
+          recipient: parentOwner,
+          type: NotificationType.reply,
+          postId: parentId,
+          preview: trimmed,
+        );
+      }
+      return reply;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Adds a newly composed top-level post to the top of the timeline and
+  /// persists it. Optimistic; removes it and records [lastError] on failure.
+  Future<Post?> addPost(Post post) async {
+    _lastError = null;
+    _posts.insert(0, post);
+    notifyListeners();
+    try {
+      final userId = supabase.auth.currentUser?.id;
+      if (userId == null) {
+        throw StateError('Not signed in');
+      }
       await supabase.from('posts').insert(<String, dynamic>{
         'id': post.id,
         'owner': userId,
@@ -204,70 +571,56 @@ class PostRepository extends ChangeNotifier {
         'media_url': post.mediaUrl,
         'media_type': post.mediaType.name,
       });
-    } catch (_) {
-      // Ignore persistence failures; the post is already shown locally.
+      return post;
+    } catch (e) {
+      _posts.removeWhere((p) => p.id == post.id);
+      _lastError = e;
+      notifyListeners();
+      return null;
     }
   }
 
-  // -- Mapping -------------------------------------------------------------
-
-  /// Maps a `posts` row (with a joined `profiles(*)` object) to a [Post].
-  Post _postFromRow(Map<String, dynamic> row) {
-    return Post(
-      id: row['id']?.toString() ?? '',
-      author: _authorFromRow(row['profiles']),
-      content: (row['content'] as String?) ?? '',
-      mediaUrl: row['media_url'] as String?,
-      mediaType: _mediaTypeFromName(row['media_type'] as String?),
-      createdAt: _parseDate(row['created_at']),
-      replyCount: _asInt(row['reply_count']),
-      repostCount: _asInt(row['repost_count']),
-      likeCount: _asInt(row['like_count']),
-      viewCount: _asInt(row['view_count']),
-    );
+  /// Clears the cache and follow set (e.g. on sign-out).
+  void clear() {
+    _posts.clear();
+    _followingPosts.clear();
+    _followingIds.clear();
+    _status = LoadStatus.idle;
+    _followingStatus = LoadStatus.idle;
+    _error = null;
+    _followingError = null;
+    _lastError = null;
+    notifyListeners();
   }
 
-  /// Builds a [UserProfile] from the joined `profiles` object. Falls back to a
-  /// minimal placeholder when the join is absent.
-  UserProfile _authorFromRow(Object? profiles) {
-    if (profiles is Map) {
-      final p = profiles.cast<String, dynamic>();
-      final username = (p['username'] as String?) ?? 'user';
-      return UserProfile(
-        id: p['id']?.toString() ?? '',
-        username: username,
-        displayName: (p['display_name'] as String?) ?? username,
-        bio: (p['bio'] as String?) ?? '',
-        avatarUrl: p['avatar_url'] as String?,
-        bannerUrl: p['banner_url'] as String?,
-        verified: (p['verified'] as bool?) ?? false,
-        verificationKind: (p['verification_kind'] as String?) ?? 'verified',
-        followers: _asInt(p['followers']),
-        following: _asInt(p['following']),
-      );
-    }
-    return const UserProfile(id: '', username: 'user', displayName: 'User');
+  // -- Helpers -------------------------------------------------------------
+
+  void _revert(String id, Post original) {
+    final i = _indexOf(id);
+    if (i >= 0) _posts[i] = original;
   }
 
-  static MediaType _mediaTypeFromName(String? name) {
-    switch (name) {
-      case 'image':
-        return MediaType.image;
-      case 'video':
-        return MediaType.video;
-      default:
-        return MediaType.none;
-    }
+  static String _previewOf(Post post) {
+    final text = post.content.trim();
+    if (text.length <= 80) return text;
+    return '${text.substring(0, 80)}...';
   }
 
-  static int _asInt(Object? value) {
-    if (value is int) return value;
-    if (value is num) return value.toInt();
-    return int.tryParse(value?.toString() ?? '') ?? 0;
+  static Set<String> _idSet(Object? rows) {
+    final list = (rows as List).cast<Map<String, dynamic>>();
+    return list
+        .map((r) => r['post_id']?.toString() ?? '')
+        .where((id) => id.isNotEmpty)
+        .toSet();
   }
 
-  static DateTime _parseDate(Object? value) {
-    if (value is DateTime) return value;
-    return DateTime.tryParse(value?.toString() ?? '') ?? DateTime.now();
-  }
+  // -- Mapping (delegates to the pure helpers in mappers.dart) -------------
+
+  Post _postFromRow(Map<String, dynamic> row) => mappers.postFromRow(row);
+
+  Post _postFromRowWithAuthor(Map<String, dynamic> row, UserProfile author) =>
+      mappers.postFromRowWithAuthor(row, author);
+
+  UserProfile _authorFromRow(Object? profiles) =>
+      mappers.profileFromRow(profiles);
 }
