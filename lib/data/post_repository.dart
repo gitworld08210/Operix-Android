@@ -75,7 +75,9 @@ class PostRepository extends ChangeNotifier {
           .limit(kFeedPageSize);
       final data = (rows as List).cast<Map<String, dynamic>>();
       if (data.isEmpty) return; // keep the mock seed as a graceful fallback
-      final mapped = data.map(_postFromRow).toList();
+      final viewer = await _viewerEngagement();
+      final mapped =
+          data.map((row) => _postFromRow(row, viewer: viewer)).toList();
       _posts
         ..clear()
         ..addAll(mapped);
@@ -110,7 +112,9 @@ class PostRepository extends ChangeNotifier {
           .limit(kFeedPageSize);
       final data = (rows as List).cast<Map<String, dynamic>>();
       if (data.isEmpty) return FeedPage.empty;
-      final mapped = data.map(_postFromRow).toList();
+      final viewer = await _viewerEngagement();
+      final mapped =
+          data.map((row) => _postFromRow(row, viewer: viewer)).toList();
       final existingIds = _posts.map((p) => p.id).toSet();
       final fresh = mapped.where((p) => !existingIds.contains(p.id)).toList();
       if (fresh.isNotEmpty) {
@@ -277,12 +281,73 @@ class PostRepository extends ChangeNotifier {
     }
   }
 
+  /// Fetches the signed-in viewer's own like/repost sets so hydrated rows can
+  /// render their `liked`/`reposted` state correctly.
+  ///
+  /// The server owns the denormalized counters, but per-viewer toggle state is
+  /// NOT denormalized onto `posts` (it is derived from the `likes`/`reposts`
+  /// join tables). Without this, [_postFromRow] would default both flags to
+  /// `false`, so a post the viewer already liked/reposted would render as
+  /// un-toggled after a [load]. This reads only the viewer's own rows (scoped
+  /// by `user_id`), bounded to the ids present is unnecessary because RLS +
+  /// the `user_id` filter already limit it to the caller's own engagement.
+  /// Fully guarded: returns an empty engagement set when Supabase is
+  /// unavailable/unauthenticated, preserving the mock-fallback path.
+  Future<_ViewerEngagement> _viewerEngagement() async {
+    final userId = supabase.auth.currentUser?.id;
+    if (userId == null) return const _ViewerEngagement.empty();
+    try {
+      final likeRows = await supabase
+          .from('likes')
+          .select('post_id')
+          .eq('user_id', userId);
+      final repostRows = await supabase
+          .from('reposts')
+          .select('post_id')
+          .eq('user_id', userId);
+      final likedIds = (likeRows as List)
+          .map((r) => (r as Map)['post_id']?.toString() ?? '')
+          .where((id) => id.isNotEmpty)
+          .toSet();
+      final repostedIds = (repostRows as List)
+          .map((r) => (r as Map)['post_id']?.toString() ?? '')
+          .where((id) => id.isNotEmpty)
+          .toSet();
+      return _ViewerEngagement(liked: likedIds, reposted: repostedIds);
+    } catch (_) {
+      // Engagement lookup failed: fall back to no per-viewer state rather than
+      // failing the whole hydration.
+      return const _ViewerEngagement.empty();
+    }
+  }
+
   // -- Mapping -------------------------------------------------------------
 
+  Post _postFromRow(Map<String, dynamic> row, {_ViewerEngagement? viewer}) {
+    return mapPostRow(
+      row,
+      likedIds: viewer?.liked ?? const <String>{},
+      repostedIds: viewer?.reposted ?? const <String>{},
+    );
+  }
+
   /// Maps a `posts` row (with a joined `profiles(*)` object) to a [Post].
-  Post _postFromRow(Map<String, dynamic> row) {
+  ///
+  /// [likedIds]/[repostedIds] are the signed-in viewer's own like/repost post
+  /// ids; when the row's id is present in those sets the mapped post carries
+  /// the corresponding `liked`/`reposted` flag. The server-owned counts are
+  /// always taken from the row as-is. Exposed for testing so the row->model
+  /// mapping (including per-viewer hydration) is verifiable without booting
+  /// Supabase.
+  @visibleForTesting
+  static Post mapPostRow(
+    Map<String, dynamic> row, {
+    Set<String> likedIds = const <String>{},
+    Set<String> repostedIds = const <String>{},
+  }) {
+    final id = row['id']?.toString() ?? '';
     return Post(
-      id: row['id']?.toString() ?? '',
+      id: id,
       author: _authorFromRow(row['profiles']),
       content: (row['content'] as String?) ?? '',
       mediaUrl: row['media_url'] as String?,
@@ -292,12 +357,14 @@ class PostRepository extends ChangeNotifier {
       repostCount: _asInt(row['repost_count']),
       likeCount: _asInt(row['like_count']),
       viewCount: _asInt(row['view_count']),
+      liked: likedIds.contains(id),
+      reposted: repostedIds.contains(id),
     );
   }
 
   /// Builds a [UserProfile] from the joined `profiles` object. Falls back to a
   /// minimal placeholder when the join is absent.
-  UserProfile _authorFromRow(Object? profiles) {
+  static UserProfile _authorFromRow(Object? profiles) {
     if (profiles is Map) {
       final p = profiles.cast<String, dynamic>();
       final username = (p['username'] as String?) ?? 'user';
@@ -338,4 +405,24 @@ class PostRepository extends ChangeNotifier {
     if (value is DateTime) return value;
     return DateTime.tryParse(value?.toString() ?? '') ?? DateTime.now();
   }
+}
+
+/// The signed-in viewer's own like/repost sets, keyed by post id.
+///
+/// Used to hydrate per-viewer `liked`/`reposted` flags onto mapped posts, which
+/// the server-owned counters on `posts` do not carry. An empty instance
+/// represents "no viewer / unauthenticated / lookup failed", in which case both
+/// flags default to `false`.
+class _ViewerEngagement {
+  const _ViewerEngagement({required this.liked, required this.reposted});
+
+  const _ViewerEngagement.empty()
+      : liked = const <String>{},
+        reposted = const <String>{};
+
+  /// Post ids the viewer has liked.
+  final Set<String> liked;
+
+  /// Post ids the viewer has reposted.
+  final Set<String> reposted;
 }

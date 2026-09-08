@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../data/feed_page.dart';
 import '../data/post_repository.dart';
 import '../data/profile_repository.dart';
 import '../models/post.dart';
@@ -85,9 +86,9 @@ class _HomeFeedScreenState extends State<HomeFeedScreen>
         builder: (context, _) {
           return TabBarView(
             controller: _tabController,
-            children: <Widget>[
-              _FeedList(posts: PostRepository.instance.forYou()),
-              _FeedList(posts: PostRepository.instance.following()),
+            children: const <Widget>[
+              _FeedList(feed: _FeedKind.forYou),
+              _FeedList(feed: _FeedKind.following),
             ],
           );
         },
@@ -96,18 +97,92 @@ class _HomeFeedScreenState extends State<HomeFeedScreen>
   }
 }
 
-class _FeedList extends StatelessWidget {
-  const _FeedList({required this.posts});
+/// Which timeline a [_FeedList] renders.
+enum _FeedKind { forYou, following }
 
-  final List<Post> posts;
+/// A scrollable feed that renders one timeline and fetches the next keyset page
+/// as the user nears the bottom (infinite scroll).
+///
+/// The list itself is driven by [PostRepository]'s in-memory cache via the
+/// [AnimatedBuilder] in the parent; when [PostRepository.loadMore] appends a
+/// fresh keyset page it notifies listeners and the list rebuilds with the new
+/// rows. Pagination is guarded end-to-end: `loadMore` is a no-op returning
+/// [FeedPage.empty] when Supabase is unavailable (tests/offline), so this stays
+/// a pure display concern and never throws into the UI.
+class _FeedList extends StatefulWidget {
+  const _FeedList({required this.feed});
+
+  final _FeedKind feed;
+
+  @override
+  State<_FeedList> createState() => _FeedListState();
+}
+
+class _FeedListState extends State<_FeedList> {
+  final ScrollController _scrollController = ScrollController();
+
+  /// True while a [PostRepository.loadMore] fetch is in flight, so overlapping
+  /// scroll events don't trigger duplicate page fetches.
+  bool _loadingMore = false;
+
+  /// False once a page returns with no more rows, so we stop querying.
+  bool _hasMore = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollController.addListener(_onScroll);
+  }
+
+  @override
+  void dispose() {
+    _scrollController
+      ..removeListener(_onScroll)
+      ..dispose();
+    super.dispose();
+  }
+
+  List<Post> _posts() {
+    final repo = PostRepository.instance;
+    return widget.feed == _FeedKind.forYou ? repo.forYou() : repo.following();
+  }
+
+  void _onScroll() {
+    if (!_scrollController.hasClients) return;
+    final position = _scrollController.position;
+    // Trigger a page fetch when within ~600px of the bottom.
+    if (position.pixels >= position.maxScrollExtent - 600) {
+      // ignore: discarded_futures
+      _maybeLoadMore();
+    }
+  }
+
+  Future<void> _maybeLoadMore() async {
+    if (_loadingMore || !_hasMore) return;
+    final posts = _posts();
+    if (posts.isEmpty) return;
+    _loadingMore = true;
+    try {
+      final cursor = FeedCursor.fromPost(posts.last);
+      final page = await PostRepository.instance.loadMore(cursor);
+      // A page smaller than the bound (or empty) means we've reached the end.
+      if (!page.hasMore && mounted) {
+        setState(() => _hasMore = false);
+      }
+    } finally {
+      _loadingMore = false;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    final posts = _posts();
     if (posts.isEmpty) {
       return const _EmptyFeed();
     }
     final repo = PostRepository.instance;
     return ListView.builder(
+      controller: _scrollController,
       itemCount: posts.length,
       itemBuilder: (context, index) {
         final post = posts[index];
