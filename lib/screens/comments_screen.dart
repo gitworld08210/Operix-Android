@@ -6,6 +6,7 @@ import '../models/post.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
 import '../theme/app_theme.dart';
+import '../utils/comment_tree.dart';
 import '../utils/format.dart';
 import '../widgets/avatar.dart';
 import '../widgets/post_card.dart';
@@ -14,10 +15,15 @@ import '../widgets/verified_badge.dart';
 /// Comments (replies) screen for a single [Post], backed by
 /// [CommentRepository.instance].
 ///
-/// Shows the parent post at the top, then the list of comments the repository
-/// provides (which server-side RLS already scopes to viewable posts, so only
-/// permitted comments are ever rendered), with loading / empty / error states,
-/// and a composer with a live character counter + validation.
+/// Shows the parent post at the top, then the THREADED list of comments the
+/// repository provides (assembled via [buildThread]: top-level newest-first
+/// with replies nested/indented under their parent). Server-side RLS already
+/// scopes comments to viewable posts, so only permitted comments are ever
+/// rendered. Each tile carries a 'Reply' affordance (which sets a pending
+/// parentId and shows a 'Replying to @handle' banner above the composer) and an
+/// interactive like control wired to [CommentRepository.toggleCommentLike].
+/// Loading / empty / error states and the composer's live character counter +
+/// validation are preserved.
 class CommentsScreen extends StatefulWidget {
   const CommentsScreen({super.key, required this.post});
 
@@ -32,6 +38,11 @@ class _CommentsScreenState extends State<CommentsScreen> {
   final FocusNode _focusNode = FocusNode();
   int _length = 0;
   String? _error;
+
+  /// The comment currently being replied to, or null for a top-level comment.
+  /// Drives the 'Replying to @handle' banner and the `parentId` passed to
+  /// [CommentRepository.addComment].
+  Comment? _replyingTo;
 
   static const int _maxChars = CommentRepository.maxContentLength;
 
@@ -59,17 +70,28 @@ class _CommentsScreenState extends State<CommentsScreen> {
     return trimmed.isNotEmpty && trimmed.length <= _maxChars;
   }
 
+  void _startReply(Comment comment) {
+    setState(() => _replyingTo = comment);
+    _focusNode.requestFocus();
+  }
+
+  void _cancelReply() {
+    setState(() => _replyingTo = null);
+  }
+
   void _send() {
     if (!_canSend) return;
     try {
       CommentRepository.instance.addComment(
         widget.post.id,
         _controller.text,
+        parentId: _replyingTo?.id,
       );
       _controller.clear();
       setState(() {
         _length = 0;
         _error = null;
+        _replyingTo = null;
       });
       _focusNode.unfocus();
     } on CommentValidationError catch (e) {
@@ -87,14 +109,15 @@ class _CommentsScreenState extends State<CommentsScreen> {
             child: AnimatedBuilder(
               animation: CommentRepository.instance,
               builder: (context, _) {
-                final comments =
+                final flat =
                     CommentRepository.instance.commentsFor(widget.post.id);
+                final nodes = flattenThread(buildThread(flat));
                 return CustomScrollView(
                   slivers: <Widget>[
                     SliverToBoxAdapter(
                       child: PostCard(post: widget.post),
                     ),
-                    if (comments.isEmpty)
+                    if (nodes.isEmpty)
                       const SliverFillRemaining(
                         hasScrollBody: false,
                         child: _EmptyComments(),
@@ -102,9 +125,19 @@ class _CommentsScreenState extends State<CommentsScreen> {
                     else
                       SliverList(
                         delegate: SliverChildBuilderDelegate(
-                          (context, index) =>
-                              _CommentTile(comment: comments[index]),
-                          childCount: comments.length,
+                          (context, index) {
+                            final node = nodes[index];
+                            return _CommentTile(
+                              comment: node.comment,
+                              depth: node.depth,
+                              liked: CommentRepository.instance
+                                  .isCommentLiked(node.comment.id),
+                              onLike: () => CommentRepository.instance
+                                  .toggleCommentLike(node.comment.id),
+                              onReply: () => _startReply(node.comment),
+                            );
+                          },
+                          childCount: nodes.length,
                         ),
                       ),
                   ],
@@ -119,6 +152,8 @@ class _CommentsScreenState extends State<CommentsScreen> {
             maxChars: _maxChars,
             error: _error,
             canSend: _canSend,
+            replyingTo: _replyingTo,
+            onCancelReply: _cancelReply,
             onSend: _send,
           ),
         ],
@@ -159,16 +194,29 @@ class _EmptyComments extends StatelessWidget {
 }
 
 class _CommentTile extends StatelessWidget {
-  const _CommentTile({required this.comment});
+  const _CommentTile({
+    required this.comment,
+    required this.depth,
+    required this.liked,
+    required this.onLike,
+    required this.onReply,
+  });
 
   final Comment comment;
+
+  /// Visual nesting depth (clamped by [buildThread] to [maxThreadDepth]).
+  final int depth;
+  final bool liked;
+  final VoidCallback onLike;
+  final VoidCallback onReply;
 
   @override
   Widget build(BuildContext context) {
     final author = comment.author;
-    // Threaded replies are indented so the parent/child relationship reads
-    // clearly in the flat newest-first list.
-    final leftPad = AppSpacing.lg + (comment.isTopLevel ? 0 : AppSpacing.xl);
+    // Threaded replies are indented by depth so the parent/child relationship
+    // reads clearly. Depth is already clamped upstream so deep chains stop
+    // indenting past the cap.
+    final leftPad = AppSpacing.lg + (depth * AppSpacing.xl);
     return Container(
       decoration: const BoxDecoration(
         border: Border(
@@ -226,22 +274,93 @@ class _CommentTile extends StatelessWidget {
                 const SizedBox(height: AppSpacing.sm),
                 Row(
                   children: <Widget>[
-                    const Icon(
-                      Icons.favorite_border,
-                      size: 15,
-                      color: AppColors.secondaryText,
+                    _LikeControl(
+                      liked: liked,
+                      count: comment.likeCount,
+                      onTap: onLike,
                     ),
-                    const SizedBox(width: 4),
-                    Text(
-                      fmtCount(comment.likeCount),
-                      style: AppTextStyles.caption,
-                    ),
+                    const SizedBox(width: AppSpacing.lg),
+                    _ReplyButton(onTap: onReply),
                   ],
                 ),
               ],
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// A tappable heart + count that reflects the viewer's like on a comment.
+class _LikeControl extends StatelessWidget {
+  const _LikeControl({
+    required this.liked,
+    required this.count,
+    required this.onTap,
+  });
+
+  final bool liked;
+  final int count;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = liked ? AppColors.like : AppColors.secondaryText;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(AppSpacing.sm),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 2),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Icon(
+              liked ? Icons.favorite : Icons.favorite_border,
+              size: 15,
+              color: color,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              fmtCount(count),
+              style: AppTextStyles.caption.copyWith(color: color),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A compact 'Reply' text affordance on each comment tile.
+class _ReplyButton extends StatelessWidget {
+  const _ReplyButton({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(AppSpacing.sm),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 2),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            const Icon(
+              Icons.reply,
+              size: 15,
+              color: AppColors.secondaryText,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              'Reply',
+              style: AppTextStyles.caption
+                  .copyWith(color: AppColors.secondaryText),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -255,6 +374,8 @@ class _Composer extends StatelessWidget {
     required this.maxChars,
     required this.error,
     required this.canSend,
+    required this.replyingTo,
+    required this.onCancelReply,
     required this.onSend,
   });
 
@@ -264,6 +385,8 @@ class _Composer extends StatelessWidget {
   final int maxChars;
   final String? error;
   final bool canSend;
+  final Comment? replyingTo;
+  final VoidCallback onCancelReply;
   final VoidCallback onSend;
 
   @override
@@ -283,6 +406,11 @@ class _Composer extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
+            if (replyingTo != null)
+              _ReplyingBanner(
+                handle: replyingTo!.author.handle,
+                onCancel: onCancelReply,
+              ),
             if (error != null)
               Padding(
                 padding: const EdgeInsets.only(bottom: AppSpacing.xs),
@@ -302,8 +430,10 @@ class _Composer extends StatelessWidget {
                     minLines: 1,
                     cursorColor: AppColors.accent,
                     style: AppTextStyles.body,
-                    decoration: const InputDecoration(
-                      hintText: 'Post your reply',
+                    decoration: InputDecoration(
+                      hintText: replyingTo == null
+                          ? 'Post your reply'
+                          : 'Reply to ${replyingTo!.author.handle}',
                     ),
                   ),
                 ),
@@ -327,6 +457,48 @@ class _Composer extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// The 'Replying to @handle · cancel' banner shown above the composer while a
+/// reply is pending.
+class _ReplyingBanner extends StatelessWidget {
+  const _ReplyingBanner({required this.handle, required this.onCancel});
+
+  final String handle;
+  final VoidCallback onCancel;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: AppSpacing.xs),
+      child: Row(
+        children: <Widget>[
+          const Icon(
+            Icons.reply,
+            size: 14,
+            color: AppColors.secondaryText,
+          ),
+          const SizedBox(width: 4),
+          Flexible(
+            child: Text(
+              'Replying to $handle',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AppTextStyles.caption,
+            ),
+          ),
+          Text('  ·  ', style: AppTextStyles.caption),
+          InkWell(
+            onTap: onCancel,
+            child: Text(
+              'cancel',
+              style: AppTextStyles.caption.copyWith(color: AppColors.accent),
+            ),
+          ),
+        ],
       ),
     );
   }

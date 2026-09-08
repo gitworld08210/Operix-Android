@@ -130,6 +130,13 @@ abstract final class MockData {
   /// (public.saves); this is only the offline/mock seed.
   static Set<String> savedPostIds() => <String>{};
 
+  /// Seed set of comment ids the current user has LIKED. Deliberately EMPTY so
+  /// an empty viewer comment-like state leaves the seeded [comments] like
+  /// counts unchanged (existing comment_repository_test.dart assertions must
+  /// not shift). Comment likes are server-backed (public.comment_likes, added
+  /// in migration 0008); this is only the offline/mock seed.
+  static Set<String> likedCommentIds() => <String>{};
+
   // -- Relationships (follow edges / requests) -----------------------------
 
   /// Seed of the current user's OUTGOING follow edges, keyed by followee id

@@ -164,6 +164,53 @@ cheap (migration `0007_relations.sql`):
 > enforcement, the reaction-count trigger, FK/uniqueness constraints, and index
 > creation must be validated on a real project before relying on them.
 
+## Comment threading + interactive likes
+
+The comments subsystem is now first-class threaded with interactive likes
+(migration `0008_comment_likes.sql`):
+
+- **Nested replies.** A pure, tested assembler
+  (`utils/comment_tree.dart` — `buildThread(List<Comment>)`) groups the flat
+  newest-first comment list into a `CommentNode` tree: top-level comments
+  newest-first, each comment's direct replies nested (also newest-first) under
+  it, and **orphan replies** (a reply whose parent is absent/filtered) surfaced
+  as top-level so nothing a viewer may see is dropped. Visual nesting is
+  clamped to `maxThreadDepth` (2) while the underlying data nesting is
+  preserved. `comments_screen` renders `flattenThread(buildThread(...))`,
+  indenting each tile by `CommentNode.depth`.
+- **Reply affordance.** Each comment tile has a **Reply** button that focuses
+  the composer and shows a `Replying to @handle · cancel` banner above it;
+  sending calls `CommentRepository.addComment(postId, text, parentId:)` so the
+  reply is stored with its `parent_id` and nests under the parent on the next
+  `buildThread`.
+- **Interactive comment likes.** `CommentRepository` exposes
+  `isCommentLiked(id)` + an optimistic single-notify `toggleCommentLike(id)`
+  that flips the viewer's liked flag and adjusts the **display** `like_count`
+  by +/-1, mirroring `PostRepository.toggleLike`. The viewer's like set is
+  seeded EMPTY from `MockData.likedCommentIds()` and hydrated from
+  `public.comment_likes` by `load` (a `setEquals` change-guard keeps offline a
+  zero-notify no-op). The client records only the join row (insert/delete keyed
+  by `(user_id, comment_id)`) and **never writes `comments.like_count`**.
+- **Server-owned count.** `comments.like_count` is recomputed from `count(*)`
+  over `public.comment_likes` by the `sync_comment_like_count` (SECURITY
+  DEFINER) trigger, mirroring `sync_post_like_count`. The optimistic +/-1 is a
+  display-only estimate reconciled on the next `load`.
+- **Notification parity.** `0008` also adds a `notify_on_comment_like` trigger
+  that notifies the liked comment's author (guarded against self-notify +
+  blocked pairs), mirroring `notify_on_like`. Because the `notifications.type`
+  check (0002) has no `comment_like` value, the row is emitted as type `like`
+  with `entity_type = 'comment'`. RLS on `comment_likes` inherits the comment's
+  post-author visibility (join `comments → posts` + `can_view_profile`),
+  mirroring `comments_select_viewable`; writes are self-scoped. Indexed by
+  `idx_comment_likes_comment`.
+
+> **ENV RISK (largest known risk).** `0008_comment_likes.sql` is **UNVERIFIED**
+> against a live Supabase project (no reachable/administerable instance, no
+> service-role key here) — **structural review only**. Live RLS enforcement,
+> the `sync_comment_like_count` count trigger, the `notify_on_comment_like`
+> producer, FK/uniqueness constraints, and index creation must be validated on
+> a real project before relying on them.
+
 ## Web-only surfaces (excluded from Android)
 
 **Ads Manager** and **Admin-OS** are **web-only** and are intentionally **not** part of this Android Flutter app. They remain in the React/Vite web project only.
