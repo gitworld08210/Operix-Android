@@ -346,6 +346,39 @@ abstract final class MockData {
         likeCount: 96,
         viewCount: 4100,
       ),
+      // p13: a QUOTE-POST exercising the model. It quotes p2 (nova's
+      // open-sourcing announcement) via `quotedPostId: 'p2'` with the SAME seed
+      // Post object hydrated into `quotedPost` for immediate rendering, plus a
+      // short commentary body. Authored by `marco` (OUTSIDE {aria, jules}) so
+      // the Following tab subset is unchanged, and it quotes a DIFFERENT post
+      // (never itself) so the self-quote check is respected. Placed LAST with
+      // the OLDEST createdAt (older than p12) so the newest-first feed ordering
+      // and the existing p1..p12 order/relative-count assertions in
+      // post_repository_test.dart are unaffected.
+      Post(
+        id: 'p13',
+        author: marco,
+        content: 'This toolkit is going to save so many teams weeks of work.',
+        quotedPostId: 'p2',
+        quotedPost: Post(
+          id: 'p2',
+          author: nova,
+          content:
+              'We are open-sourcing our internal charting toolkit next week. '
+              'Follow along for the release. #opensource',
+          createdAt: now.subtract(const Duration(minutes: 47)),
+          replyCount: 210,
+          repostCount: 940,
+          likeCount: 12400,
+          viewCount: 512000,
+          reposted: true,
+        ),
+        createdAt: now.subtract(const Duration(days: 1, hours: 12)),
+        replyCount: 3,
+        repostCount: 5,
+        likeCount: 64,
+        viewCount: 2800,
+      ),
     ];
   }
 

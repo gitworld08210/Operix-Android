@@ -45,6 +45,8 @@ class PostCard extends StatefulWidget {
     this.onShare,
     this.onTap,
     this.onAuthorTap,
+    this.onQuotedTap,
+    this.onQuote,
   });
 
   final Post post;
@@ -65,6 +67,15 @@ class PostCard extends StatefulWidget {
   final VoidCallback? onShare;
   final VoidCallback? onTap;
   final VoidCallback? onAuthorTap;
+
+  /// Invoked when the embedded QUOTED-POST card is tapped (e.g. to open the
+  /// quoted post's detail/comments). Only relevant when this post quotes
+  /// another (`post.quotedPostId != null`).
+  final VoidCallback? onQuotedTap;
+
+  /// Invoked from the overflow menu's 'Quote' action to open the composer
+  /// pre-attached to this post as a quote-post.
+  final VoidCallback? onQuote;
 
   @override
   State<PostCard> createState() => _PostCardState();
@@ -117,12 +128,30 @@ class _PostCardState extends State<PostCard> {
                   _Header(
                     post: post,
                     onAuthorTap: widget.onAuthorTap,
-                    overflow: isOwnPost
-                        ? const SizedBox.shrink()
-                        : _PostOverflowMenu(post: post),
+                    overflow: _PostOverflowMenu(
+                      post: post,
+                      isOwnPost: isOwnPost,
+                      onQuote: widget.onQuote,
+                    ),
                   ),
                   const SizedBox(height: 2),
                   _caption(context),
+                  // QUOTE-POST: a compact embedded card placed after the
+                  // caption. Rendered when this post quotes another; a resolved
+                  // embed shows the quoted author/caption/thumbnail, while a set
+                  // quotedPostId with a null quotedPost (not viewable / not
+                  // cached) shows a subtle 'unavailable' placeholder. The embed
+                  // is NON-RECURSIVE (one level only).
+                  if (post.quotedPostId != null) ...<Widget>[
+                    const SizedBox(height: AppSpacing.md),
+                    if (post.quotedPost != null)
+                      _QuotedEmbed(
+                        quoted: post.quotedPost!,
+                        onTap: widget.onQuotedTap,
+                      )
+                    else
+                      const _QuotedUnavailable(),
+                  ],
                   if (post.hasMedia) ...<Widget>[
                     const SizedBox(height: AppSpacing.md),
                     // Switch the media block on the polymorphic content kind:
@@ -175,35 +204,9 @@ class _PostCardState extends State<PostCard> {
 
   /// Splits the text into runs, coloring #hashtags and @mentions in X-blue.
   ///
-  /// Highlighting uses the SAME grammar the extractors use (see
-  /// `utils/text_entities.dart` [hashtagPattern] / [mentionPattern]) so the
-  /// highlighted span and the extracted/linked entity are byte-identical: a
-  /// hashtag body excludes dots (a trailing `.` ends the tag), while a mention
-  /// body allows dots. The two source patterns are combined into one alternation
-  /// so a single left-to-right scan colors both kinds.
-  TextSpan _linkify(String text) {
-    final spans = <TextSpan>[];
-    final pattern = RegExp(
-      '(?:${hashtagPattern.pattern})|(?:${mentionPattern.pattern})',
-    );
-    var lastEnd = 0;
-    for (final match in pattern.allMatches(text)) {
-      if (match.start > lastEnd) {
-        spans.add(TextSpan(text: text.substring(lastEnd, match.start)));
-      }
-      spans.add(
-        TextSpan(
-          text: match.group(0),
-          style: const TextStyle(color: AppColors.accent),
-        ),
-      );
-      lastEnd = match.end;
-    }
-    if (lastEnd < text.length) {
-      spans.add(TextSpan(text: text.substring(lastEnd)));
-    }
-    return TextSpan(children: spans);
-  }
+  /// Delegates to the shared [linkifyEntities] so the outer caption and the
+  /// embedded quoted-post caption highlight identically.
+  TextSpan _linkify(String text) => linkifyEntities(text);
 
   Widget _actions() {
     final post = widget.post;
@@ -469,9 +472,20 @@ class _Header extends StatelessWidget {
 /// report post. Wired to [SafetyRepository]; mute/block show an Undo snackbar,
 /// report opens a reason sheet and confirms optimistically.
 class _PostOverflowMenu extends StatelessWidget {
-  const _PostOverflowMenu({required this.post});
+  const _PostOverflowMenu({
+    required this.post,
+    required this.isOwnPost,
+    this.onQuote,
+  });
 
   final Post post;
+
+  /// When true the mute/block/report actions (self-directed safety actions on
+  /// one's OWN post) are omitted, matching the profile screen's guard. The
+  /// 'Quote' action is always offered.
+  final bool isOwnPost;
+
+  final VoidCallback? onQuote;
 
   @override
   Widget build(BuildContext context) {
@@ -486,18 +500,25 @@ class _PostOverflowMenu extends StatelessWidget {
       color: AppColors.surface,
       onSelected: (value) => _onSelected(context, value),
       itemBuilder: (context) => <PopupMenuEntry<String>>[
-        PopupMenuItem<String>(
-          value: 'mute',
-          child: Text('Mute @${author.username}'),
-        ),
-        PopupMenuItem<String>(
-          value: 'block',
-          child: Text('Block @${author.username}'),
-        ),
-        const PopupMenuItem<String>(
-          value: 'report',
-          child: Text('Report post'),
-        ),
+        if (onQuote != null)
+          const PopupMenuItem<String>(
+            value: 'quote',
+            child: Text('Quote'),
+          ),
+        if (!isOwnPost) ...<PopupMenuEntry<String>>[
+          PopupMenuItem<String>(
+            value: 'mute',
+            child: Text('Mute @${author.username}'),
+          ),
+          PopupMenuItem<String>(
+            value: 'block',
+            child: Text('Block @${author.username}'),
+          ),
+          const PopupMenuItem<String>(
+            value: 'report',
+            child: Text('Report post'),
+          ),
+        ],
       ],
     );
   }
@@ -506,6 +527,8 @@ class _PostOverflowMenu extends StatelessWidget {
     final safety = SafetyRepository.instance;
     final author = post.author;
     switch (value) {
+      case 'quote':
+        onQuote?.call();
       case 'mute':
         safety.mute(author.id);
         _showUndo(context, 'Muted @${author.username}',
@@ -708,6 +731,178 @@ class _AttachmentImage extends StatelessWidget {
             ),
           ),
       ],
+    );
+  }
+}
+
+/// Splits [text] into runs, coloring #hashtags and @mentions in X-blue.
+///
+/// Highlighting uses the SAME grammar the extractors use (see
+/// `utils/text_entities.dart` [hashtagPattern] / [mentionPattern]) so the
+/// highlighted span and the extracted/linked entity are byte-identical: a
+/// hashtag body excludes dots (a trailing `.` ends the tag), while a mention
+/// body allows dots. The two source patterns are combined into one alternation
+/// so a single left-to-right scan colors both kinds. Shared by the main caption
+/// and the embedded quoted-post caption so they can never disagree.
+TextSpan linkifyEntities(String text) {
+  final spans = <TextSpan>[];
+  final pattern = RegExp(
+    '(?:${hashtagPattern.pattern})|(?:${mentionPattern.pattern})',
+  );
+  var lastEnd = 0;
+  for (final match in pattern.allMatches(text)) {
+    if (match.start > lastEnd) {
+      spans.add(TextSpan(text: text.substring(lastEnd, match.start)));
+    }
+    spans.add(
+      TextSpan(
+        text: match.group(0),
+        style: const TextStyle(color: AppColors.accent),
+      ),
+    );
+    lastEnd = match.end;
+  }
+  if (lastEnd < text.length) {
+    spans.add(TextSpan(text: text.substring(lastEnd)));
+  }
+  return TextSpan(children: spans);
+}
+
+/// A COMPACT embedded quoted-post card rendered inside a [PostCard] (and reused
+/// as a read-only preview in the composer).
+///
+/// Shows the quoted author's small avatar, display name, handle, and verified
+/// badge, the truncated + linkified quoted caption, and a small thumbnail when
+/// the quoted post has media (the first attachment for a carousel). It is
+/// deliberately NON-RECURSIVE: it never renders the quoted post's OWN quoted
+/// embed, so nesting is capped at one level. Tapping invokes [onTap].
+class QuotedEmbedCard extends StatelessWidget {
+  const QuotedEmbedCard({super.key, required this.quoted, this.onTap});
+
+  final Post quoted;
+  final VoidCallback? onTap;
+
+  static const int _captionTruncateAt = 140;
+
+  @override
+  Widget build(BuildContext context) {
+    final author = quoted.author;
+    final content = quoted.content;
+    final shown = content.length > _captionTruncateAt
+        ? '${content.substring(0, _captionTruncateAt).trimRight()}…'
+        : content;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(AppRadii.md),
+      child: Container(
+        decoration: BoxDecoration(
+          border: Border.all(color: AppColors.border, width: 0.5),
+          borderRadius: BorderRadius.circular(AppRadii.md),
+        ),
+        padding: const EdgeInsets.all(AppSpacing.sm),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                Avatar(
+                  url: author.avatarUrl,
+                  displayName: author.displayName,
+                  size: 20,
+                ),
+                const SizedBox(width: AppSpacing.sm),
+                Flexible(
+                  child: Text(
+                    author.displayName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: AppTextStyles.name.copyWith(fontSize: 13),
+                  ),
+                ),
+                if (author.verified) ...<Widget>[
+                  const SizedBox(width: 4),
+                  VerifiedBadge(kind: author.verificationKind),
+                ],
+                const SizedBox(width: 4),
+                Flexible(
+                  child: Text(
+                    author.handle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: AppTextStyles.handle.copyWith(fontSize: 13),
+                  ),
+                ),
+              ],
+            ),
+            if (shown.isNotEmpty) ...<Widget>[
+              const SizedBox(height: AppSpacing.xs),
+              Text.rich(
+                linkifyEntities(shown),
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: AppTextStyles.body.copyWith(fontSize: 14),
+              ),
+            ],
+            if (quoted.hasMedia) ...<Widget>[
+              const SizedBox(height: AppSpacing.sm),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(AppRadii.sm),
+                child: AspectRatio(
+                  aspectRatio: 16 / 9,
+                  child: _AttachmentImage(
+                    url: quoted.attachments.first.url,
+                    isVideo:
+                        quoted.attachments.first.type == AttachmentType.video,
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The private in-card wrapper delegating to the public [QuotedEmbedCard].
+class _QuotedEmbed extends StatelessWidget {
+  const _QuotedEmbed({required this.quoted, this.onTap});
+
+  final Post quoted;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) =>
+      QuotedEmbedCard(quoted: quoted, onTap: onTap);
+}
+
+/// A subtle placeholder shown when a post carries a quotedPostId but the quoted
+/// post could not be resolved (not viewable under RLS, or not cached).
+class _QuotedUnavailable extends StatelessWidget {
+  const _QuotedUnavailable();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        border: Border.all(color: AppColors.border, width: 0.5),
+        borderRadius: BorderRadius.circular(AppRadii.md),
+      ),
+      padding: const EdgeInsets.all(AppSpacing.md),
+      child: Row(
+        children: <Widget>[
+          const Icon(
+            Icons.visibility_off_outlined,
+            size: 18,
+            color: AppColors.secondaryText,
+          ),
+          const SizedBox(width: AppSpacing.sm),
+          Text(
+            'This post is unavailable',
+            style: AppTextStyles.handle,
+          ),
+        ],
+      ),
     );
   }
 }

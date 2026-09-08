@@ -104,6 +104,46 @@ A **text-only tweet** is simply a `Post` with zero attachments
 > bucket (populating the attachment URLs from device bytes) is Phase 4; the seam
 > is marked in code with `// PHASE 4 SEAM: ...`.
 
+### Quote-posts
+
+A **quote-post** is a post that embeds/references another post. It is optional
+and fully backward compatible: existing posts carry a null reference and render
+exactly as before. Quoting is **orthogonal to media kind** — you can quote with
+a text body or with media.
+
+- **Model.** `Post` carries a nullable `quotedPostId` (the durable FK) and a
+  nullable `quotedPost` (the hydrated embed used for rendering). `quotedPost`
+  may be null even when `quotedPostId` is set (the quoted post is not cached or
+  not viewable). It is **not** part of `==` / `hashCode`, which stay id-based;
+  `copyWith` exposes `clearQuotedPost` / `clearQuotedPostId` escape hatches
+  (mirroring `clearMyReaction`) since a null arg is indistinguishable from
+  "unchanged".
+- **Migration `0010_quote_posts.sql`.** Adds a nullable self-referencing FK
+  `posts.quoted_post_id uuid references public.posts(id) on delete set null`
+  (deleting a quoted post degrades the quoting post to a normal post rather than
+  cascading a delete), a guarded `posts_no_self_quote` CHECK (a post may not
+  quote itself), and an index for reverse lookups. **No new RLS is required:**
+  the existing `posts_select_viewable` policy already gates every posts row by
+  `can_view_profile(auth.uid(), owner)`, and a joined quoted post is its own
+  posts row under the same policy, so an unviewable quoted post simply yields a
+  null embed. Live application is **UNVERIFIED** in this environment (no
+  reachable Supabase) and validated by structural review only.
+- **One-level embed hydrate.** `PostRepository` fetches the quoted post one
+  level deep via the aliased self-embed `quoted:quoted_post_id(*, profiles(*),
+  post_attachments(*))`; `mapPostRow` maps the nested `quoted` object into
+  `quotedPost` but **never recurses** — the embedded post's own `quotedPost` is
+  always null. Absence of the join is tolerated gracefully (null embed).
+- **Rendering.** `PostCard` renders a compact bordered quoted-post card after
+  the caption (small avatar + name/handle + verified badge, truncated caption
+  linkified with the shared `#`/`@` grammar, and a thumbnail when the quoted
+  post has media). When `quotedPostId` is set but the embed can't be resolved it
+  shows a subtle **"This post is unavailable"** placeholder. The embedded card
+  never nests a second-level embed.
+- **Compose.** `ComposeScreen(quoted: post)` opens the composer pre-attached to
+  a quoted post (from the PostCard overflow menu's **Quote** action), shows a
+  read-only preview, and builds the post with `quotedPostId` + `quotedPost`. A
+  quote-post is postable **even with an empty body** when a quote is attached.
+
 ## Stories (24h ephemeral)
 
 Instagram-style **stories** live at the top of the home feed:

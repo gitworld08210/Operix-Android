@@ -11,6 +11,7 @@ import '../widgets/avatar.dart';
 import '../widgets/post_card.dart';
 import '../widgets/story_ring.dart';
 import 'comments_screen.dart';
+import 'compose_screen.dart';
 
 /// Home timeline with 'For You' / 'Following' tabs, wired to
 /// [PostRepository.instance].
@@ -207,6 +208,10 @@ class _FeedListState extends State<_FeedList> {
           onReply: () => _openComments(context, post),
           onShare: () => _snack(context, 'Share sheet coming soon'),
           onTap: () => _openComments(context, post),
+          onQuotedTap: post.quotedPost != null
+              ? () => _openComments(context, post.quotedPost!)
+              : null,
+          onQuote: () => _openQuoteCompose(context, post),
           onAuthorTap: () {},
         );
       },
@@ -217,6 +222,16 @@ class _FeedListState extends State<_FeedList> {
     Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => CommentsScreen(post: post),
+      ),
+    );
+  }
+
+  /// Opens the composer pre-attached to [post] as a QUOTE-POST.
+  void _openQuoteCompose(BuildContext context, Post post) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        fullscreenDialog: true,
+        builder: (_) => ComposeScreen(quoted: post),
       ),
     );
   }

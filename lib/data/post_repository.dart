@@ -96,7 +96,13 @@ class PostRepository extends ChangeNotifier {
     try {
       final rows = await supabase
           .from('posts')
-          .select('*, profiles(*), post_attachments(*), reactions(type)')
+          .select(
+            // Fetch the quoted post ONE LEVEL deep via the FK-named self-embed
+            // hint, aliased `quoted`. UNVERIFIED against live PostgREST (env
+            // risk); mapPostRow tolerates its absence (null embed) gracefully.
+            '*, profiles(*), post_attachments(*), reactions(type), '
+            'quoted:quoted_post_id(*, profiles(*), post_attachments(*))',
+          )
           .order('created_at', ascending: false)
           .order('id', ascending: false)
           .limit(kFeedPageSize);
@@ -129,7 +135,11 @@ class PostRepository extends ChangeNotifier {
       final iso = cursor.createdAt.toUtc().toIso8601String();
       final rows = await supabase
           .from('posts')
-          .select('*, profiles(*), post_attachments(*), reactions(type)')
+          .select(
+            // See load(): fetch the aliased one-level quoted self-embed.
+            '*, profiles(*), post_attachments(*), reactions(type), '
+            'quoted:quoted_post_id(*, profiles(*), post_attachments(*))',
+          )
           .or(
             'created_at.lt.$iso,'
             'and(created_at.eq.$iso,id.lt.${cursor.id})',
@@ -406,6 +416,8 @@ class PostRepository extends ChangeNotifier {
         'media_url': post.mediaUrl,
         'media_type': post.mediaType.name,
         'kind': post.kind.name,
+        // QUOTE-POST durable FK (null for a normal post). See migration 0010.
+        'quoted_post_id': post.quotedPostId,
         // Optional free-text location tag (Phase 3). A real place-picker /
         // geocoder that also fills lat/lng is a Phase 4/5 seam.
         'location': post.location,
@@ -579,6 +591,7 @@ class PostRepository extends ChangeNotifier {
     Set<String> likedIds = const <String>{},
     Set<String> repostedIds = const <String>{},
     Set<String> reactedIds = const <String>{},
+    bool embedQuoted = true,
   }) {
     final id = row['id']?.toString() ?? '';
     final attachments = _attachmentsFromRow(id, row);
@@ -596,8 +609,36 @@ class PostRepository extends ChangeNotifier {
             (likedIds.contains(id) || reactedIds.contains(id)
                 ? ReactionType.like
                 : null);
+    // QUOTE-POST: read the durable FK, and hydrate a ONE-LEVEL-DEEP embed from
+    // the aliased `quoted` self-join when present. The embedded post is mapped
+    // with `embedQuoted: false` so it NEVER re-hydrates its own quoted post
+    // (one-level cap, no unbounded nesting). Absence of the join is tolerated
+    // gracefully: quotedPost stays null (unavailable / not-viewable case), and
+    // the quotedPostId FK still round-trips. NOTE: the aliased self-embed shape
+    // (`quoted:quoted_post_id(...)`) is UNVERIFIED against live PostgREST (env
+    // risk) — the mapper reads whatever nested object is present under
+    // `quoted` and otherwise leaves the embed null.
+    final quotedPostId = row['quoted_post_id']?.toString();
+    Post? quotedPost;
+    if (embedQuoted) {
+      final quotedRaw = row['quoted'];
+      if (quotedRaw is Map) {
+        quotedPost = mapPostRow(
+          quotedRaw.cast<String, dynamic>(),
+          viewerReactions: viewerReactions,
+          likedIds: likedIds,
+          repostedIds: repostedIds,
+          reactedIds: reactedIds,
+          embedQuoted: false,
+        );
+      }
+    }
     return Post(
       id: id,
+      quotedPostId: (quotedPostId != null && quotedPostId.isNotEmpty)
+          ? quotedPostId
+          : null,
+      quotedPost: quotedPost,
       author: _authorFromRow(row['profiles']),
       content: (row['content'] as String?) ?? '',
       location: row['location'] as String?,

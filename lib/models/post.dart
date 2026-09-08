@@ -85,6 +85,8 @@ class Post {
     this.location,
     this.lat,
     this.lng,
+    this.quotedPostId,
+    this.quotedPost,
   })  : attachments = attachments ??
             _legacyAttachments(id, mediaUrl, mediaType),
         kind = deriveKind(
@@ -162,6 +164,23 @@ class Post {
   final double? lat;
   final double? lng;
 
+  /// QUOTE-POST reference (durable FK): the id of the post this post quotes, or
+  /// null for a normal post. Persisted as `posts.quoted_post_id` (a nullable
+  /// self-referencing FK, ON DELETE SET NULL — see migration
+  /// `0010_quote_posts.sql`). A quote-post is ORTHOGONAL to media kind: you can
+  /// quote with a text body or with media, so [kind]/[attachments] are
+  /// unaffected by quoting.
+  final String? quotedPostId;
+
+  /// QUOTE-POST embed (hydrated convenience): the quoted [Post] itself, for
+  /// rendering the embedded card. NULLABLE and NOT part of ==/hashCode (which
+  /// stay id-based). This MAY be null even when [quotedPostId] is set — e.g. the
+  /// quoted post is not in cache or the viewer cannot view its author (the
+  /// existing `posts_select_viewable` RLS policy simply yields a null embed).
+  /// Only ever hydrated ONE LEVEL deep: a quoted post's own [quotedPost] is
+  /// always null (no unbounded nesting).
+  final Post? quotedPost;
+
   /// Legacy compatibility VIEW: whether the viewer has LIKED this post.
   ///
   /// Under the LIKE-IMPLIES-LIKED rule this is true exactly when the viewer's
@@ -207,6 +226,10 @@ class Post {
     String? location,
     double? lat,
     double? lng,
+    String? quotedPostId,
+    bool clearQuotedPostId = false,
+    Post? quotedPost,
+    bool clearQuotedPost = false,
   }) {
     // Resolve the viewer's reaction, in precedence order:
     //   1. `clearMyReaction: true` forces it to null (needed because a null
@@ -245,6 +268,12 @@ class Post {
       location: location ?? this.location,
       lat: lat ?? this.lat,
       lng: lng ?? this.lng,
+      // Escape hatches mirror `clearMyReaction`: a null `quotedPostId`/
+      // `quotedPost` arg is indistinguishable from "unchanged", so an explicit
+      // `clearQuotedPostId`/`clearQuotedPost` is required to null a set value.
+      quotedPostId:
+          clearQuotedPostId ? null : (quotedPostId ?? this.quotedPostId),
+      quotedPost: clearQuotedPost ? null : (quotedPost ?? this.quotedPost),
     );
   }
 

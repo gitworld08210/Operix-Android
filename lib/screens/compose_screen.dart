@@ -14,11 +14,19 @@ import '../utils/ids.dart';
 import '../utils/text_entities.dart';
 import '../utils/text_post.dart';
 import '../widgets/avatar.dart';
+import '../widgets/post_card.dart';
 
 /// Full-screen compose route. Building a [Post] from the current profile and
 /// the entered text, then popping.
 class ComposeScreen extends StatefulWidget {
-  const ComposeScreen({super.key});
+  const ComposeScreen({super.key, this.quoted});
+
+  /// QUOTE-POST entry point: when set, the composer opens pre-attached to this
+  /// quoted post. It shows a read-only compact preview above the toolbar and
+  /// builds the composed [Post] with `quotedPostId: quoted.id` +
+  /// `quotedPost: quoted`. A quote-post is postable even with an empty text
+  /// body. Null for normal compose (behavior unchanged).
+  final Post? quoted;
 
   @override
   State<ComposeScreen> createState() => _ComposeScreenState();
@@ -64,14 +72,15 @@ class _ComposeScreenState extends State<ComposeScreen> {
   }
 
   // A post is postable when it is a valid text-only tweet OR it carries at
-  // least one attachment while staying within the character limit. The
-  // text-only path is driven by the shared validateTextPost helper so the
-  // composer, counter, and unit tests agree; attachment-post behavior is
-  // unchanged (attachments alone remain postable as long as text isn't over
-  // the limit).
+  // least one attachment OR it attaches a QUOTED post, while staying within the
+  // character limit. The text-only path is driven by the shared
+  // validateTextPost helper so the composer, counter, and unit tests agree;
+  // attachment-post behavior is unchanged. A quote-post is postable even with
+  // an empty body (quoting without commentary is valid), as long as the text
+  // is not over the limit.
   bool get _canPost {
     final validation = validateTextPost(_controller.text);
-    if (_attachments.isNotEmpty) {
+    if (_attachments.isNotEmpty || widget.quoted != null) {
       return !validation.isOverLimit;
     }
     return validation.isValid;
@@ -94,6 +103,7 @@ class _ComposeScreenState extends State<ComposeScreen> {
     ];
     final content = _controller.text.trim();
     final location = _locationController.text.trim();
+    final quoted = widget.quoted;
     final post = Post(
       id: id,
       author: user,
@@ -103,6 +113,10 @@ class _ComposeScreenState extends State<ComposeScreen> {
       // PHASE 4/5 SEAM: free-text location now; a place-picker/geocoder later
       // resolves lat/lng.
       location: location.isEmpty ? null : location,
+      // QUOTE-POST: carry the durable FK + the hydrated embed for immediate
+      // rendering when this compose quotes another post.
+      quotedPostId: quoted?.id,
+      quotedPost: quoted,
     );
     // Extract the discovery entities from the caption using the SAME grammar
     // the card linkifier highlights (see utils/text_entities.dart), so the
@@ -320,6 +334,13 @@ class _ComposeScreenState extends State<ComposeScreen> {
                         ),
                       ],
                     ),
+                    if (widget.quoted != null) ...<Widget>[
+                      const SizedBox(height: AppSpacing.md),
+                      // Read-only preview of the post being quoted. Reuses the
+                      // same compact embed widget the feed renders (no onTap so
+                      // it is non-interactive here).
+                      QuotedEmbedCard(quoted: widget.quoted!),
+                    ],
                   ],
                 ),
               ),
