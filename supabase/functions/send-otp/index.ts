@@ -22,9 +22,9 @@ const ACS_CONNECTION_STRING = Deno.env.get("AZURE_ACS_CONNECTION_STRING") ?? "";
 // secret) so the stored hash is useless without server-side context.
 const PEPPER = Deno.env.get("OTP_PEPPER") ?? SERVICE_ROLE_KEY;
 
-// Verified ACS sender for this tenant.
+// Verified ACS sender for this tenant (the connected Azure managed domain).
 const SENDER_ADDRESS =
-  "DoNotReply@9492de8c-c56d-44f6-a797-24bc8fd6c182.azurecomm.net";
+  "DoNotReply@4942de8c-c56d-4496-a797-24bc8fd6c182.azurecomm.net";
 const ACS_API_VERSION = "2023-03-31";
 
 const RATE_LIMIT_WINDOW_MIN = 15;
