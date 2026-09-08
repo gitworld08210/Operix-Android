@@ -287,6 +287,75 @@ class PostRepository extends ChangeNotifier {
     }
   }
 
+  /// Returns the cached top-level post with [id], or null if not loaded.
+  Post? postById(String id) {
+    final i = _indexOf(id);
+    return i < 0 ? null : _posts[i];
+  }
+
+  /// Fetches the top-level posts authored by [ownerId] (newest first), joining
+  /// the author profile. Used by the profile screen for any user. Returns an
+  /// empty list on failure.
+  Future<List<Post>> postsByOwner(String ownerId) async {
+    try {
+      final rows = await supabase
+          .from('posts')
+          .select('*, profiles(*)')
+          .eq('owner', ownerId)
+          .isFilter('parent_id', null)
+          .order('created_at', ascending: false);
+      final data = (rows as List).cast<Map<String, dynamic>>();
+      final posts = data.map(_postFromRow).toList();
+      _applyEngagementFlags(posts);
+      return posts;
+    } catch (_) {
+      return const <Post>[];
+    }
+  }
+
+  /// Fetches the current user's bookmarked posts (newest bookmark first),
+  /// joining the author profile. Returns an empty list on failure.
+  Future<List<Post>> bookmarkedPosts() async {
+    try {
+      final myId = supabase.auth.currentUser?.id;
+      if (myId == null) return const <Post>[];
+      final rows = await supabase
+          .from('bookmarks')
+          .select('created_at, posts(*, profiles(*))')
+          .eq('user_id', myId)
+          .order('created_at', ascending: false);
+      final data = (rows as List).cast<Map<String, dynamic>>();
+      final posts = <Post>[];
+      for (final row in data) {
+        final postRow = row['posts'];
+        if (postRow is Map) {
+          final p = _postFromRow(postRow.cast<String, dynamic>());
+          posts.add(p.copyWith(bookmarked: true));
+        }
+      }
+      _applyEngagementFlags(posts, forceBookmarked: true);
+      return posts;
+    } catch (_) {
+      return const <Post>[];
+    }
+  }
+
+  /// Overlays the cached engagement flags (liked/reposted/bookmarked) onto a
+  /// freshly fetched list where the cache already knows the post, so
+  /// off-feed lists (profile, bookmarks) render the correct toggle state.
+  void _applyEngagementFlags(List<Post> posts, {bool forceBookmarked = false}) {
+    for (var i = 0; i < posts.length; i++) {
+      final cached = postById(posts[i].id);
+      if (cached != null) {
+        posts[i] = posts[i].copyWith(
+          liked: cached.liked,
+          reposted: cached.reposted,
+          bookmarked: forceBookmarked ? true : cached.bookmarked,
+        );
+      }
+    }
+  }
+
   /// Returns the replies to [parentId] (posts whose `parent_id` is [parentId]),
   /// oldest first, with their authors joined. Returns an empty list on failure.
   Future<List<Post>> replies(String parentId) async {
@@ -298,6 +367,55 @@ class PostRepository extends ChangeNotifier {
           .order('created_at', ascending: true);
       final data = (rows as List).cast<Map<String, dynamic>>();
       return data.map(_postFromRow).toList(growable: false);
+    } catch (_) {
+      return const <Post>[];
+    }
+  }
+
+  /// Searches posts by content via the `search_posts` RPC (case-insensitive
+  /// trigram / hashtag text match). The RPC returns bare `posts` rows without
+  /// the joined author, so this resolves each distinct owner from the
+  /// `profiles` table and attaches it. Returns an empty list on failure or for
+  /// a blank query.
+  Future<List<Post>> searchPosts(String query) async {
+    final q = query.trim();
+    if (q.isEmpty) return const <Post>[];
+    try {
+      final rows = await supabase.rpc(
+        'search_posts',
+        params: <String, dynamic>{'q': q},
+      );
+      final data = (rows as List).cast<Map<String, dynamic>>();
+      if (data.isEmpty) return const <Post>[];
+
+      // Resolve authors for the distinct owners in a single query.
+      final ownerIds = data
+          .map((r) => r['owner']?.toString() ?? '')
+          .where((id) => id.isNotEmpty)
+          .toSet()
+          .toList();
+      final authors = <String, UserProfile>{};
+      if (ownerIds.isNotEmpty) {
+        final profileRows = await supabase
+            .from('profiles')
+            .select()
+            .inFilter('id', ownerIds);
+        final profiles = (profileRows as List).cast<Map<String, dynamic>>();
+        for (final row in profiles) {
+          final author = _authorFromRow(row);
+          if (author.id.isNotEmpty) authors[author.id] = author;
+        }
+      }
+
+      final posts = <Post>[];
+      for (final row in data) {
+        final ownerId = row['owner']?.toString() ?? '';
+        final author = authors[ownerId] ??
+            const UserProfile(id: '', username: 'user', displayName: 'User');
+        posts.add(_postFromRowWithAuthor(row, author));
+      }
+      _applyEngagementFlags(posts);
+      return posts;
     } catch (_) {
       return const <Post>[];
     }
@@ -415,10 +533,13 @@ class PostRepository extends ChangeNotifier {
 
   // -- Mapping -------------------------------------------------------------
 
-  Post _postFromRow(Map<String, dynamic> row) {
+  Post _postFromRow(Map<String, dynamic> row) =>
+      _postFromRowWithAuthor(row, _authorFromRow(row['profiles']));
+
+  Post _postFromRowWithAuthor(Map<String, dynamic> row, UserProfile author) {
     return Post(
       id: row['id']?.toString() ?? '',
-      author: _authorFromRow(row['profiles']),
+      author: author,
       content: (row['content'] as String?) ?? '',
       mediaUrl: row['media_url'] as String?,
       mediaType: _mediaTypeFromName(row['media_type'] as String?),

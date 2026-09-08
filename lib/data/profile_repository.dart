@@ -169,6 +169,40 @@ class ProfileRepository extends ChangeNotifier {
     }
   }
 
+  /// Searches profiles by username / display name via the `search_profiles`
+  /// RPC (case-insensitive trigram). Returns an empty list on failure or for a
+  /// blank query.
+  Future<List<UserProfile>> searchProfiles(String query) async {
+    final q = query.trim();
+    if (q.isEmpty) return const <UserProfile>[];
+    try {
+      final rows = await supabase.rpc(
+        'search_profiles',
+        params: <String, dynamic>{'q': q},
+      );
+      final data = (rows as List).cast<Map<String, dynamic>>();
+      return data.map(_profileFromRow).toList(growable: false);
+    } catch (_) {
+      return const <UserProfile>[];
+    }
+  }
+
+  /// Suggested people to follow for the idle search state: profiles other than
+  /// the current user, not already followed. Returns an empty list on failure.
+  Future<List<UserProfile>> suggestedProfiles({int limit = 20}) async {
+    try {
+      final myId = supabase.auth.currentUser?.id;
+      final rows = await supabase.from('profiles').select().limit(limit);
+      final data = (rows as List).cast<Map<String, dynamic>>();
+      return data
+          .map(_profileFromRow)
+          .where((p) => p.id != myId && !_followingIds.contains(p.id))
+          .toList(growable: false);
+    } catch (_) {
+      return const <UserProfile>[];
+    }
+  }
+
   /// Fetches a single profile by username.
   Future<UserProfile?> profileByUsername(String username) async {
     try {

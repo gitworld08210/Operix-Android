@@ -1,16 +1,20 @@
 import 'package:flutter/material.dart';
 
+import '../data/load_status.dart';
 import '../data/post_repository.dart';
 import '../data/profile_repository.dart';
 import '../models/post.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
+import '../theme/app_theme.dart';
 import '../widgets/app_scaffold.dart';
 import '../widgets/avatar.dart';
 import '../widgets/post_card.dart';
+import 'post_detail_screen.dart';
 
 /// Home timeline with 'For You' / 'Following' tabs, wired to
-/// [PostRepository.instance].
+/// [PostRepository.instance] with real loading / empty / error states and
+/// pull-to-refresh.
 class HomeFeedScreen extends StatefulWidget {
   const HomeFeedScreen({super.key});
 
@@ -36,21 +40,26 @@ class _HomeFeedScreenState extends State<HomeFeedScreen>
 
   @override
   Widget build(BuildContext context) {
-    final currentUser = ProfileRepository.instance.currentUser;
     return Scaffold(
       appBar: AppBar(
         titleSpacing: 16,
         leading: Padding(
           padding: const EdgeInsets.only(left: 12),
-          child: GestureDetector(
-            onTap: () => openProfile(context),
-            child: Center(
-              child: Avatar(
-                url: currentUser?.avatarUrl,
-                displayName: currentUser?.displayName ?? 'You',
-                size: 32,
-              ),
-            ),
+          child: AnimatedBuilder(
+            animation: ProfileRepository.instance,
+            builder: (context, _) {
+              final currentUser = ProfileRepository.instance.currentUser;
+              return GestureDetector(
+                onTap: () => openProfile(context),
+                child: Center(
+                  child: Avatar(
+                    url: currentUser?.avatarUrl,
+                    displayName: currentUser?.displayName ?? 'You',
+                    size: 32,
+                  ),
+                ),
+              );
+            },
           ),
         ),
         title: const Text('Oneleven'),
@@ -82,11 +91,20 @@ class _HomeFeedScreenState extends State<HomeFeedScreen>
       body: AnimatedBuilder(
         animation: PostRepository.instance,
         builder: (context, _) {
+          final repo = PostRepository.instance;
           return TabBarView(
             controller: _tabController,
             children: <Widget>[
-              _FeedList(posts: PostRepository.instance.forYou()),
-              _FeedList(posts: PostRepository.instance.following()),
+              _FeedTab(
+                posts: repo.forYou(),
+                status: repo.status,
+                emptyKind: _EmptyKind.forYou,
+              ),
+              _FeedTab(
+                posts: repo.following(),
+                status: repo.status,
+                emptyKind: _EmptyKind.following,
+              ),
             ],
           );
         },
@@ -95,44 +113,79 @@ class _HomeFeedScreenState extends State<HomeFeedScreen>
   }
 }
 
-class _FeedList extends StatelessWidget {
-  const _FeedList({required this.posts});
+enum _EmptyKind { forYou, following }
+
+class _FeedTab extends StatelessWidget {
+  const _FeedTab({
+    required this.posts,
+    required this.status,
+    required this.emptyKind,
+  });
 
   final List<Post> posts;
+  final LoadStatus status;
+  final _EmptyKind emptyKind;
+
+  Future<void> _refresh() => PostRepository.instance.load();
 
   @override
   Widget build(BuildContext context) {
-    if (posts.isEmpty) {
-      return const _EmptyFeed();
+    // Loading with nothing to show yet: centered spinner.
+    if (status == LoadStatus.loading && posts.isEmpty) {
+      return const Center(
+        child: CircularProgressIndicator(color: AppColors.accent),
+      );
     }
-    final repo = PostRepository.instance;
-    return ListView.builder(
-      itemCount: posts.length,
-      itemBuilder: (context, index) {
-        final post = posts[index];
-        return PostCard(
-          post: post,
-          onLike: () => repo.toggleLike(post.id),
-          onRepost: () => repo.toggleRepost(post.id),
-          onBookmark: () => repo.toggleBookmark(post.id),
-          onReply: () => _snack(context, 'Replies are not available in this demo'),
-          onShare: () => _snack(context, 'Share sheet coming soon'),
-          onTap: () {},
-          onAuthorTap: () {},
-        );
-      },
-    );
-  }
 
-  void _snack(BuildContext context, String message) {
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(message)));
+    // Error with nothing to show: message + Retry.
+    if (status == LoadStatus.error && posts.isEmpty) {
+      return _FeedError(onRetry: _refresh);
+    }
+
+    // Loaded/idle but empty.
+    if (posts.isEmpty) {
+      return RefreshIndicator(
+        onRefresh: _refresh,
+        color: AppColors.accent,
+        child: SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          child: SizedBox(
+            height: MediaQuery.of(context).size.height * 0.7,
+            child: _EmptyFeed(kind: emptyKind),
+          ),
+        ),
+      );
+    }
+
+    final repo = PostRepository.instance;
+    return RefreshIndicator(
+      onRefresh: _refresh,
+      color: AppColors.accent,
+      child: ListView.builder(
+        physics: const AlwaysScrollableScrollPhysics(),
+        itemCount: posts.length,
+        itemBuilder: (context, index) {
+          final post = posts[index];
+          return PostCard(
+            post: post,
+            onLike: () => repo.toggleLike(post.id),
+            onRepost: () => repo.toggleRepost(post.id),
+            onBookmark: () => repo.toggleBookmark(post.id),
+            onReply: () => openPostDetail(context, post, focusReply: true),
+            onShare: () => sharePost(context, post),
+            onTap: () => openPostDetail(context, post),
+            onAuthorTap: () => openAuthorProfile(context, post.author.id),
+          );
+        },
+      ),
+    );
   }
 }
 
-class _EmptyFeed extends StatelessWidget {
-  const _EmptyFeed();
+class _FeedError extends StatelessWidget {
+  const _FeedError({required this.onRetry});
+
+  final Future<void> Function() onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -142,16 +195,57 @@ class _EmptyFeed extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            const Icon(Icons.forum_outlined,
+            const Icon(Icons.error_outline,
                 size: 48, color: AppColors.secondaryText),
             const SizedBox(height: 12),
+            Text('Could not load your feed', style: AppTextStyles.title),
+            const SizedBox(height: 6),
             Text(
-              'Nothing here yet',
+              'Check your connection and try again.',
+              textAlign: TextAlign.center,
+              style: AppTextStyles.handle,
+            ),
+            const SizedBox(height: AppSpacing.md),
+            OutlinedButton(
+              onPressed: onRetry,
+              child: const Text('Retry'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _EmptyFeed extends StatelessWidget {
+  const _EmptyFeed({required this.kind});
+
+  final _EmptyKind kind;
+
+  @override
+  Widget build(BuildContext context) {
+    final isFollowing = kind == _EmptyKind.following;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Icon(
+              isFollowing ? Icons.people_outline : Icons.forum_outlined,
+              size: 48,
+              color: AppColors.secondaryText,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              isFollowing ? 'Nothing here yet' : 'Your feed is empty',
               style: AppTextStyles.title,
             ),
             const SizedBox(height: 6),
             Text(
-              'Posts from people you follow will show up here.',
+              isFollowing
+                  ? 'Posts from people you follow will show up here.'
+                  : 'Be the first to post something. Pull down to refresh.',
               textAlign: TextAlign.center,
               style: AppTextStyles.handle,
             ),

@@ -42,10 +42,13 @@ class _ComposeScreenState extends State<ComposeScreen> {
 
   bool get _canPost => _length > 0 && _length <= _maxChars;
 
-  void _post() {
-    if (!_canPost) return;
+  bool _posting = false;
+
+  Future<void> _post() async {
+    if (!_canPost || _posting) return;
     final user = ProfileRepository.instance.currentUser;
     if (user == null) return; // must be signed in and loaded
+    setState(() => _posting = true);
     final post = Post(
       // A client-generated UUID so the in-memory id equals the persisted DB
       // row id (the posts.id uuid column accepts it). See utils/ids.dart.
@@ -55,9 +58,23 @@ class _ComposeScreenState extends State<ComposeScreen> {
       createdAt: DateTime.now(),
     );
     // addPost inserts into the Supabase `posts` table and updates the
-    // in-memory feed; it is awaited internally and reverts on failure.
+    // in-memory feed; it awaits the insert and reverts on failure.
+    final repo = PostRepository.instance;
+    final result = await repo.addPost(post);
+    if (!mounted) return;
+    if (result == null) {
+      setState(() => _posting = false);
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(content: Text('Could not post. Please try again.')),
+        );
+      return;
+    }
+    // Refresh from the server so DB defaults / counters are authoritative
+    // rather than trusting only the optimistic insert. Fire-and-forget.
     // ignore: discarded_futures
-    PostRepository.instance.addPost(post);
+    repo.load();
     Navigator.of(context).pop();
   }
 
@@ -112,10 +129,25 @@ class _ComposeScreenState extends State<ComposeScreen> {
     PostRepository.instance.addPost(reelPost);
   }
 
-  void _mockAttach(String label) {
+  // Media attach is the byte-source seam. Picking raw image/video bytes needs
+  // a gallery/camera picker (e.g. image_picker), which cannot be added under
+  // INTEGRATIONS_ONLY (pub.dev unreachable). The upload path itself is real
+  // (see _uploadReel + StorageService.uploadReel/uploadAvatar); only the byte
+  // source is missing. We surface that clearly instead of a misleading demo
+  // snackbar. Once bytes are available:
+  //   final userId = AuthRepository.instance.currentUser?.id;
+  //   if (userId == null) return;
+  //   await _uploadReel(userId, pickedBytes);
+  void _onAddMedia() {
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text('$label is not available in this demo')));
+      ..showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Media upload needs a gallery picker, which is not bundled yet.',
+          ),
+        ),
+      );
   }
 
   @override
@@ -137,7 +169,7 @@ class _ComposeScreenState extends State<ComposeScreen> {
               vertical: AppSpacing.sm,
             ),
             child: ElevatedButton(
-              onPressed: _canPost ? _post : null,
+              onPressed: (_canPost && !_posting) ? _post : null,
               style: ElevatedButton.styleFrom(
                 backgroundColor: AppColors.accent,
                 disabledBackgroundColor: AppColors.accent.withOpacity(0.4),
@@ -190,7 +222,7 @@ class _ComposeScreenState extends State<ComposeScreen> {
             _Toolbar(
               length: _length,
               maxChars: _maxChars,
-              onAttach: _mockAttach,
+              onAddMedia: _onAddMedia,
             ),
           ],
         ),
@@ -203,12 +235,12 @@ class _Toolbar extends StatelessWidget {
   const _Toolbar({
     required this.length,
     required this.maxChars,
-    required this.onAttach,
+    required this.onAddMedia,
   });
 
   final int length;
   final int maxChars;
-  final void Function(String label) onAttach;
+  final VoidCallback onAddMedia;
 
   @override
   Widget build(BuildContext context) {
@@ -224,20 +256,13 @@ class _Toolbar extends StatelessWidget {
       ),
       child: Row(
         children: <Widget>[
+          // Single media button. The byte source (gallery/camera picker) is the
+          // only unwired step; the upload + persistence path is real. See the
+          // seam documented on _ComposeScreenState._onAddMedia / _uploadReel.
           IconButton(
-            onPressed: () => onAttach('Photos'),
+            onPressed: onAddMedia,
             icon: const Icon(Icons.image_outlined, color: AppColors.accent),
             tooltip: 'Media',
-          ),
-          IconButton(
-            onPressed: () => onAttach('GIF'),
-            icon: const Icon(Icons.gif_box_outlined, color: AppColors.accent),
-            tooltip: 'GIF',
-          ),
-          IconButton(
-            onPressed: () => onAttach('Poll'),
-            icon: const Icon(Icons.poll_outlined, color: AppColors.accent),
-            tooltip: 'Poll',
           ),
           const Spacer(),
           Text(
