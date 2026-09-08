@@ -277,22 +277,16 @@ class _AuthScreenState extends State<AuthScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: <Widget>[
-            const _XWordmark(size: 26),
-            TextButton(
-              onPressed: _busy
-                  ? null
-                  : () => _showInfo(
-                        'Phone sign-in isn\'t available yet. Use email.',
-                      ),
-              style: TextButton.styleFrom(foregroundColor: AppColors.primaryText),
-              child: const Text('Use phone'),
-            ),
-          ],
+        _AuthTopBar(
+          onBack: _busy ? null : () => setState(() => _step = _Step.welcome),
+          trailingLabel: 'Use phone',
+          onTrailing: _busy
+              ? null
+              : () => _showInfo(
+                    'Phone sign-in isn\'t available yet. Use email.',
+                  ),
         ),
-        const SizedBox(height: AppSpacing.xl),
+        const SizedBox(height: AppSpacing.xxl),
         Text('Enter your email address', style: AppTextStyles.headline),
         const SizedBox(height: AppSpacing.sm),
         Text('We\'ll send you a verification code', style: AppTextStyles.subtitle),
@@ -330,18 +324,12 @@ class _AuthScreenState extends State<AuthScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: <Widget>[
-            const _XWordmark(size: 26),
-            TextButton(
-              onPressed: _busy ? null : _changeEmail,
-              style: TextButton.styleFrom(foregroundColor: AppColors.primaryText),
-              child: const Text('Change email'),
-            ),
-          ],
+        _AuthTopBar(
+          onBack: _busy ? null : _changeEmail,
+          trailingLabel: 'Change email',
+          onTrailing: _busy ? null : _changeEmail,
         ),
-        const SizedBox(height: AppSpacing.xl),
+        const SizedBox(height: AppSpacing.xxl),
         Text('We sent you a code', style: AppTextStyles.headline),
         const SizedBox(height: AppSpacing.sm),
         Text('Enter it below to verify $_email', style: AppTextStyles.subtitle),
@@ -400,6 +388,49 @@ class _AuthScreenState extends State<AuthScreen> {
       ),
       border: const UnderlineInputBorder(
         borderSide: BorderSide(color: AppColors.border),
+      ),
+    );
+  }
+}
+
+/// X-style top bar for the email/code steps: a back button on the left, a
+/// small centered X wordmark, and a text action on the right. Uses comfortable
+/// touch targets and vertical breathing room so it doesn't crowd the status
+/// bar the way a bare Row did.
+class _AuthTopBar extends StatelessWidget {
+  const _AuthTopBar({
+    required this.onBack,
+    required this.trailingLabel,
+    required this.onTrailing,
+  });
+
+  final VoidCallback? onBack;
+  final String trailingLabel;
+  final VoidCallback? onTrailing;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 48,
+      child: Row(
+        children: <Widget>[
+          IconButton(
+            onPressed: onBack,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+            icon: const Icon(Icons.arrow_back, color: AppColors.primaryText),
+            tooltip: 'Back',
+          ),
+          const Expanded(child: Center(child: _XWordmark(size: 28))),
+          TextButton(
+            onPressed: onTrailing,
+            style: TextButton.styleFrom(
+              foregroundColor: AppColors.primaryText,
+              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
+            ),
+            child: Text(trailingLabel),
+          ),
+        ],
       ),
     );
   }
