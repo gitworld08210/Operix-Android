@@ -50,11 +50,11 @@ class _SearchScreenState extends State<SearchScreen> {
           controller: _controller,
           textInputAction: TextInputAction.search,
           style: AppTextStyles.body,
-          decoration: InputDecoration(
+          decoration: const InputDecoration(
             hintText: 'Search Oneleven',
-            prefixIcon: const Icon(Icons.search, color: AppColors.secondaryText),
+            prefixIcon: Icon(Icons.search, color: AppColors.secondaryText),
             isDense: true,
-            contentPadding: const EdgeInsets.symmetric(vertical: 8),
+            contentPadding: EdgeInsets.symmetric(vertical: 8),
           ),
         ),
       ),

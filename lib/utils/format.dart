@@ -1,4 +1,5 @@
 /// Small formatting helpers shared across widgets and screens.
+library;
 
 /// Formats a count into a compact abbreviation (1.2K, 3.4M) like the web app.
 String fmtCount(int value) {

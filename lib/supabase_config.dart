@@ -22,7 +22,7 @@ const String supabaseAnonKey = String.fromEnvironment(
 /// `WidgetsFlutterBinding.ensureInitialized()`.
 Future<void> initSupabase() async => Supabase.initialize(
       url: supabaseUrl,
-      anonKey: supabaseAnonKey,
+      publishableKey: supabaseAnonKey,
     );
 
 /// Convenience accessor for the initialized Supabase client.

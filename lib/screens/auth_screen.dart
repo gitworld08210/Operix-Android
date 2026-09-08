@@ -255,7 +255,7 @@ class _PrimaryButton extends StatelessWidget {
         style: ElevatedButton.styleFrom(
           backgroundColor: AppColors.accent,
           foregroundColor: AppColors.white,
-          disabledBackgroundColor: AppColors.accent.withOpacity(0.5),
+          disabledBackgroundColor: AppColors.accent.withValues(alpha: 0.5),
           shape: const StadiumBorder(),
           textStyle: AppTextStyles.label,
         ),

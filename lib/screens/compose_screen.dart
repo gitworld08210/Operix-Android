@@ -222,7 +222,7 @@ class _ComposeScreenState extends State<ComposeScreen> {
               onPressed: _canPost ? _post : null,
               style: ElevatedButton.styleFrom(
                 backgroundColor: AppColors.accent,
-                disabledBackgroundColor: AppColors.accent.withOpacity(0.4),
+                disabledBackgroundColor: AppColors.accent.withValues(alpha: 0.4),
                 foregroundColor: AppColors.white,
                 disabledForegroundColor: AppColors.white,
               ),
