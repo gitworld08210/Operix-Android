@@ -1,4 +1,3 @@
-import '../models/conversation.dart';
 /// Pure, network-independent mapping helpers that translate raw Supabase row
 /// maps into the app's immutable models.
 ///
