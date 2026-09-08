@@ -158,7 +158,10 @@ owner-scoped. To make media private in a future version, flip the bucket
 
 ### Authentication (email OTP)
 
-Sign-up and login use **email one-time codes** (no passwords):
+Sign-up and login use **email one-time codes** (no passwords). The auth screen
+is an X-styled multi-step flow (welcome → email → 6-digit code); any
+phone/social affordance honestly routes into this working email flow (this
+project has no SMS/OAuth provider, so nothing fabricates a code):
 
 1. The user enters an email on the auth screen; the app calls
    `supabase.auth.signInWithOtp(email: ...)` (via `AuthRepository.sendOtp`).
