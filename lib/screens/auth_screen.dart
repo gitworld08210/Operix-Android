@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../data/auth_repository.dart';
 import '../theme/app_colors.dart';
@@ -11,11 +10,13 @@ import '../theme/app_theme.dart';
 ///
 /// The visual flow mirrors X (Twitter): a black welcome screen with the white
 /// X wordmark, then an "Enter your email address" step, then a 6-digit code
-/// step. The WORKING mechanism underneath is unchanged Supabase email OTP:
-/// [AuthRepository.sendOtp] sends the code and [AuthRepository.verifyOtp]
-/// verifies it. On successful verification the app's `AuthGate` (which listens
-/// to Supabase auth state) automatically swaps this screen for the main shell,
-/// so no explicit navigation is needed on success.
+/// step. The WORKING mechanism underneath is email OTP delivered via Azure
+/// Communication Services through two Supabase Edge Functions:
+/// [AuthRepository.sendOtp] emails the 6-digit code and
+/// [AuthRepository.verifyOtp] verifies it and finalizes the session. On
+/// successful verification the app's `AuthGate` (which listens to Supabase auth
+/// state) automatically swaps this screen for the main shell, so no explicit
+/// navigation is needed on success.
 ///
 /// Honesty constraints: this Supabase project has no SMS provider, so any
 /// phone / social affordance either routes into the working email flow or
@@ -111,7 +112,7 @@ class _AuthScreenState extends State<AuthScreen> {
         _step = _Step.code;
       });
       _showInfo('We sent a code to $email.');
-    } on AuthException catch (e) {
+    } on OtpException catch (e) {
       _showError(e.message);
     } catch (_) {
       _showError('Could not send the code. Please try again.');
@@ -126,7 +127,7 @@ class _AuthScreenState extends State<AuthScreen> {
     try {
       await AuthRepository.instance.sendOtp(_email);
       _showInfo('We sent a new code to $_email.');
-    } on AuthException catch (e) {
+    } on OtpException catch (e) {
       _showError(e.message);
     } catch (_) {
       _showError('Could not resend the code. Please try again.');
@@ -145,10 +146,10 @@ class _AuthScreenState extends State<AuthScreen> {
     try {
       await AuthRepository.instance.verifyOtp(email: _email, token: token);
       // On success the AuthGate stream flips to the main shell automatically.
-    } on AuthException catch (e) {
-      // Surface Supabase's own message (e.g. "Token has expired or is
-      // invalid") plus a readable hint to check the email or resend.
-      _showError('${e.message} Check your email or tap "Resend code".');
+    } on OtpException catch (e) {
+      // Surface the repository's human-readable message (invalid/expired code,
+      // too many attempts, ...) which already includes a resend hint.
+      _showError(e.message);
     } catch (_) {
       _showError('Could not verify the code. Please try again.');
     } finally {

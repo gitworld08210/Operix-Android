@@ -212,47 +212,61 @@ owner-scoped. To make media private in a future version, flip the bucket
 
 ### Authentication (email OTP)
 
-Sign-up and login use **email one-time codes** (no passwords). The auth screen
-is an X-styled multi-step flow (welcome → email → 6-digit code); any
-phone/social affordance honestly routes into this working email flow (this
-project has no SMS/OAuth provider, so nothing fabricates a code):
+Sign-up and login use **email one-time codes** (no passwords), delivered via
+**Azure Communication Services (ACS)** through two Supabase **Edge Functions**
+(`send-otp` and `verify-otp`). The auth screen is an X-styled multi-step flow
+(welcome → email → 6-digit code); any phone/social affordance honestly routes
+into this working email flow (this project has no SMS/OAuth provider, so
+nothing fabricates a code):
 
 1. The user enters an email on the auth screen; the app calls
-   `supabase.auth.signInWithOtp(email: ...)` (via `AuthRepository.sendOtp`).
-   Supabase emails a 6-digit code and, for a new email, creates the auth user
-   (and, through the trigger, a `profiles` row).
+   `supabase.functions.invoke('send-otp', body: {'email': ...})` (via
+   `AuthRepository.sendOtp`). The `send-otp` function generates a 6-digit code,
+   stores its hash, and emails the code through Azure Communication Services.
 2. The user enters the code; the app calls
-   `supabase.auth.verifyOTP(type: OtpType.email, email: ..., token: ...)`
-   (via `AuthRepository.verifyOtp`), which establishes the session.
-3. `main.dart`'s auth gate listens to auth state and shows the app shell when a
+   `supabase.functions.invoke('verify-otp', body: {'email': ..., 'code': ...})`
+   (via `AuthRepository.verifyOtp`). The `verify-otp` function validates the
+   code, finds-or-creates the auth user (setting `email_confirm` server-side),
+   and returns a **`token_hash`**.
+3. The client finalizes the Supabase session with
+   `supabase.auth.verifyOTP(type: OtpType.magiclink, tokenHash: token_hash)`.
+   After that `supabase.auth.currentSession` is non-null and
+   `onAuthStateChange` fires.
+4. `main.dart`'s auth gate listens to auth state and shows the app shell when a
    session exists, otherwise the auth screen. Signing out
    (`AuthRepository.signOut`) returns to the auth screen.
 
-**Phone OTP is out of scope** for this app; only email OTP is wired.
+The Flutter app never sees or holds any ACS credential: it only uses the public
+anon key (`lib/supabase_config.dart`) and invokes the Edge Functions. **Phone
+OTP is out of scope** for this app; only email OTP is wired.
 
-#### Required Supabase email template (6-digit code, not a magic link)
+#### Edge Functions and the ACS secret
 
-The auth UI collects a **6-digit code**, so the Supabase project's email
-template must send the token/code and not (only) a magic link. Configure it
-once in the dashboard:
+Both `send-otp` and `verify-otp` are deployed with **`verify_jwt = false`**
+(they are called before a session exists). They send email through Azure
+Communication Services using a connection string held **only server-side** in
+the Supabase secret **`AZURE_ACS_CONNECTION_STRING`** (read inside the
+functions via `Deno.env.get('AZURE_ACS_CONNECTION_STRING')`).
 
-1. **Authentication → Email Templates → Magic Link** (this is the template
-   `signInWithOtp(email:)` uses).
-2. Ensure the template body includes the token variable **`{{ .Token }}`**,
-   e.g. `Your Oneleven code is {{ .Token }}`. If the template only contains
-   `{{ .ConfirmationURL }}` (the default magic-link), the email will not carry
-   a 6-digit code and the code-entry step in `auth_screen.dart` cannot succeed.
-3. (Optional) Under **Authentication → Providers → Email**, keep "Enable email
-   provider" on; a password is not required for the OTP flow.
-4. (Optional, recommended for instant login) Under **Authentication →
-   Providers → Email**, turn **"Confirm email" off**. With confirmation off a
-   brand-new email can sign in immediately with the emitted 6-digit code (no
-   separate confirmation click), which is the smoothest OTP experience for this
-   app. Leaving it on still works but requires the first email to be confirmed.
+Set the secret on the Supabase project before the flow will work at runtime,
+either from the dashboard (**Edge Functions → Manage secrets**) or the CLI:
 
-The client verifies with `verifyOTP(type: OtpType.email, ...)`, which expects
-the numeric token from `{{ .Token }}`. Magic-link click-through is **not** the
-flow used here.
+```sh
+supabase secrets set AZURE_ACS_CONNECTION_STRING="endpoint=https://oneleven.india.communication.azure.com/;accesskey=..."
+```
+
+- **ACS endpoint:** `https://oneleven.india.communication.azure.com`
+- **Verified sender:**
+  `DoNotReply@9492de8c-c56d-44f6-a797-24bc8fd6c182.azurecomm.net`
+
+> ⚠️ **Never** put `AZURE_ACS_CONNECTION_STRING` (or any service_role key) in
+> the app, `lib/`, `pubspec.yaml`, the README, or the APK. It lives exclusively
+> in the Edge Function secrets.
+
+Because `verify-otp` sets `email_confirm` server-side and mints the session
+token itself, **Supabase's built-in email confirmation / magic-link template is
+no longer used for OTP**. There is nothing to configure under Authentication →
+Email Templates for this flow; the 6-digit code email comes entirely from ACS.
 
 ### Data layer (fully Supabase-backed)
 
