@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:oneleven/data/feed_page.dart';
 import 'package:oneleven/data/mock_data.dart';
 import 'package:oneleven/data/post_repository.dart';
 import 'package:oneleven/data/save_repository.dart';
@@ -724,4 +725,39 @@ void main() {
       expect(repo.toggleBookmark('nope'), isNull);
     });
   });
+
+  group('loadMore / loadMoreFollowing (offline mock path)', () {
+    // Under `flutter test` Supabase is not initialized, so both pagers must be
+    // guarded no-ops returning FeedPage.empty (never throwing, never an error
+    // signal), preserving the mock-fallback contract.
+    final cursor = repoCursorFromFirst;
+
+    test('loadMore returns FeedPage.empty when Supabase is unavailable',
+        () async {
+      final page = await repo.loadMore(cursor(repo));
+      expect(page.posts, isEmpty);
+      expect(page.hasMore, isFalse);
+      expect(page.error, isFalse);
+    });
+
+    test(
+        'loadMoreFollowing returns FeedPage.empty when Supabase is unavailable',
+        () async {
+      final page = await repo.loadMoreFollowing(cursor(repo));
+      expect(page.posts, isEmpty);
+      expect(page.hasMore, isFalse);
+      expect(page.error, isFalse);
+    });
+
+    test('loadMore does not throw and leaves the cache unchanged', () async {
+      final before = repo.forYou().length;
+      await repo.loadMore(cursor(repo));
+      expect(repo.forYou().length, before);
+    });
+  });
 }
+
+/// Helper: a keyset cursor derived from the repository's current first post,
+/// used to drive the offline pagination no-op tests.
+FeedCursor Function(PostRepository) get repoCursorFromFirst =>
+    (repo) => FeedCursor.fromPost(repo.forYou().first);

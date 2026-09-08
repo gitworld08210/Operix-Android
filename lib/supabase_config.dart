@@ -27,3 +27,21 @@ Future<void> initSupabase() async => Supabase.initialize(
 
 /// Convenience accessor for the initialized Supabase client.
 SupabaseClient get supabase => Supabase.instance.client;
+
+/// Whether the global Supabase client has been initialized.
+///
+/// [Supabase.instance] throws when [initSupabase] has not run (e.g. under
+/// `flutter test` or offline). Guarded repository code uses this to tell an
+/// UNINITIALIZED-client no-op (tests/offline: nothing to load, no error to
+/// surface) apart from a REAL fetch failure on a live client (network/query),
+/// so a failed page can raise a retry affordance without breaking the no-throw
+/// contract.
+bool get isSupabaseInitialized {
+  try {
+    // Touching the singleton throws an AssertionError before initialize().
+    Supabase.instance;
+    return true;
+  } catch (_) {
+    return false;
+  }
+}

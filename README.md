@@ -144,6 +144,69 @@ a text body or with media.
   read-only preview, and builds the post with `quotedPostId` + `quotedPost`. A
   quote-post is postable **even with an empty body** when a quote is attached.
 
+## Infinity feed
+
+The home timeline is a genuinely endless feed mixing every content type
+(text / image / carousel / quote, and future video) on **keyset (seek)
+pagination**, not offset pagination. `lib/data/feed_page.dart` holds the
+primitives (`kFeedPageSize = 20`, `FeedCursor`, `FeedPage`) and
+`lib/data/post_repository.dart` holds the pagers.
+
+- **Keyset (seek) pagination.** Each page is fetched with a
+  `(created_at, id) < (cursor.createdAt, cursor.id)` predicate over the
+  `(created_at desc, id desc)` index — never `offset N` (which the database
+  must scan past and which degrades at scale). `id` is the stable tie-break so
+  rows sharing a `created_at` are never skipped or duplicated. The predicate
+  string is built once by the pure static `PostRepository.keysetPredicate` and
+  shared by both pagers so they cannot drift.
+- **Pagination decoupled from display ranking.** The ranking strategy
+  (`ChronologicalRanking` / `EngagementRanking` in `feed_ranking.dart`) orders
+  what is **shown**; the pagination cursor tracks the **keyset frontier**. The
+  pager pages off the TRUE keyset tail — `PostRepository.keysetMinCursor` (the
+  oldest loaded row by `created_at desc, id desc`), then each fetched
+  `FeedPage.nextCursor` — **not** the ranked display tail. This resolves a prior
+  correctness gap where paging off `posts.last` of the ranked list was correct
+  only under chronological ranking; a non-chronological strategy like
+  `EngagementRanking` can no longer corrupt pagination. Proven by a unit test
+  that `keysetMinCursor` is identical whether the list is ranked chronologically
+  or by engagement.
+- **Following-scoped query.** The For You tab uses the global `loadMore`; the
+  Following tab uses `loadMoreFollowing`, which applies the **same** keyset
+  predicate **plus** an author filter `owner in (<followed ids>)`. Without it, a
+  sparse Following feed could exhaust the global page window on non-followed
+  authors and **stall** before reaching older followed posts. The followed
+  author id set is fetched (guarded) from the `follows` table per page.
+- **No duplicates, no drops.** Fetched rows are de-duped by id against the cache
+  via the pure static `PostRepository.freshPosts` before appending, and each
+  page's `nextCursor` is the keyset tail of that page (`mapped.last`, since the
+  query orders `created_at desc, id desc`), making the cursor **strictly
+  monotonic decreasing** across pages — so no row is skipped or repeated. The
+  `forYou()` / `following()` getters still return unmodifiable, de-duped lists.
+- **Prefetch.** `_FeedList` fetches the next page when the user scrolls within
+  ~600px of the bottom, and also kicks an **initial prefetch** when the first
+  page under-fills the viewport (so a short first page still becomes endless).
+  An in-flight guard (`_loadingMore`) plus per-tab `_hasMore` prevent
+  overlapping or duplicate fetches; each tab carries its **own** cursor and
+  `_hasMore`.
+- **Footer states.** The footer decision is a pure function
+  `footerStateFor({loadingMore, hasMore, hasError, isEmpty})` returning a
+  `FeedFooterState` the widget renders off (so it is unit-testable without a
+  device or golden): a **loading-next** spinner as the last row while a fetch is
+  in flight, a subtle **"You're all caught up"** at the end of the feed, an
+  inline **"Couldn't load more — Retry"** on failure, and the per-tab **empty**
+  state (For You vs Following copy). Because the pagers swallow fetch errors to
+  keep their guarded no-throw contract, a failed page is signalled **without
+  throwing** via `FeedPage.failure` (`error: true`, `hasMore: true` so a retry
+  is offered); under the tests/offline path an uninitialized client is a no-op
+  returning `FeedPage.empty` instead.
+
+> **Environment risk — live queries UNVERIFIED.** The live keyset `.or(...)`
+> predicate and the following-scoped `owner in (...)` query (and the
+> FEAT-013 self-embed join) are **UNVERIFIED** against a real Supabase in this
+> environment (no reachable/administerable project) and are validated by
+> **structural review only**. The mock/offline path is fully exercised by unit
+> tests; both pagers are guarded no-ops returning `FeedPage.empty` there.
+
 ## Stories (24h ephemeral)
 
 Instagram-style **stories** live at the top of the home feed:
