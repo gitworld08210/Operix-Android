@@ -1,7 +1,9 @@
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 
+import '../data/auth_repository.dart';
 import '../data/post_repository.dart';
 import '../data/profile_repository.dart';
 import '../data/storage_service.dart';
@@ -26,6 +28,12 @@ class _ComposeScreenState extends State<ComposeScreen> {
   static const int _maxChars = 280;
   int _length = 0;
 
+  // A pending image attachment picked from the gallery/camera. The bytes are
+  // uploaded to the `post-media` bucket on Post; until then we hold them so the
+  // compose UI can show a preview and the user can remove them.
+  Uint8List? _pendingImageBytes;
+  String _pendingImageExt = 'jpg';
+
   @override
   void initState() {
     super.initState();
@@ -40,7 +48,9 @@ class _ComposeScreenState extends State<ComposeScreen> {
     super.dispose();
   }
 
-  bool get _canPost => _length > 0 && _length <= _maxChars;
+  // A post is valid when it has text within the limit, or an attached image.
+  bool get _canPost =>
+      (_length > 0 || _pendingImageBytes != null) && _length <= _maxChars;
 
   bool _posting = false;
 
@@ -49,12 +59,44 @@ class _ComposeScreenState extends State<ComposeScreen> {
     final user = ProfileRepository.instance.currentUser;
     if (user == null) return; // must be signed in and loaded
     setState(() => _posting = true);
+
+    // Upload any attached image first so the post row can carry its media_url.
+    String? mediaUrl;
+    var mediaType = MediaType.none;
+    final imageBytes = _pendingImageBytes;
+    if (imageBytes != null) {
+      final userId = AuthRepository.instance.currentUser?.id;
+      if (userId != null) {
+        try {
+          mediaUrl = await StorageService.uploadPostImage(
+            userId: userId,
+            bytes: imageBytes,
+            ext: _pendingImageExt,
+          );
+          mediaType = MediaType.image;
+        } catch (_) {
+          if (!mounted) return;
+          setState(() => _posting = false);
+          ScaffoldMessenger.of(context)
+            ..hideCurrentSnackBar()
+            ..showSnackBar(
+              const SnackBar(
+                content: Text('Could not upload the image. Please try again.'),
+              ),
+            );
+          return;
+        }
+      }
+    }
+
     final post = Post(
       // A client-generated UUID so the in-memory id equals the persisted DB
       // row id (the posts.id uuid column accepts it). See utils/ids.dart.
       id: newUuidV4(),
       author: user,
       content: _controller.text.trim(),
+      mediaUrl: mediaUrl,
+      mediaType: mediaType,
       createdAt: DateTime.now(),
     );
     // addPost inserts into the Supabase `posts` table and updates the
@@ -78,25 +120,10 @@ class _ComposeScreenState extends State<ComposeScreen> {
     Navigator.of(context).pop();
   }
 
-  // ---------------------------------------------------------------------------
-  // SCAFFOLD: reel upload call site.
-  //
-  // Composing a reel needs raw video bytes from the device. No file/image
-  // picker dependency is bundled (deps are kept minimal), so ONLY the
-  // byte-source (gallery/camera picker) is left as a TODO. The rest of the
-  // flow below is real: it uploads to the `reels` storage bucket AND writes a
-  // first-class row into the `reels` table (so that table is not dead), then
-  // surfaces the reel in the timeline as a video post. Once bytes are
-  // available, `_uploadReel` runs end-to-end.
-  //
-  //   final userId = AuthRepository.instance.currentUser?.id;
-  //   if (userId == null) return; // must be signed in
-  //   final Uint8List bytes = /* TODO: pick from gallery/camera */;
-  //   await _uploadReel(userId, bytes);
-  //
-  // StorageService.uploadReel is imported and ready; wiring a picker is the
-  // only remaining step.
-  // ignore: unused_element
+  // Uploads a picked video as a reel: stores the bytes in the `reels` storage
+  // bucket, writes a first-class row into the `reels` table, and surfaces the
+  // reel in the timeline as a video post. The byte source (gallery/camera) is
+  // wired via image_picker in _pickVideo below.
   Future<void> _uploadReel(String userId, Uint8List bytes) async {
     final videoUrl = await StorageService.uploadReel(
       userId: userId,
@@ -129,25 +156,75 @@ class _ComposeScreenState extends State<ComposeScreen> {
     PostRepository.instance.addPost(reelPost);
   }
 
-  // Media attach is the byte-source seam. Picking raw image/video bytes needs
-  // a gallery/camera picker (e.g. image_picker), which cannot be added under
-  // INTEGRATIONS_ONLY (pub.dev unreachable). The upload path itself is real
-  // (see _uploadReel + StorageService.uploadReel/uploadAvatar); only the byte
-  // source is missing. We surface that clearly instead of a misleading demo
-  // snackbar. Once bytes are available:
-  //   final userId = AuthRepository.instance.currentUser?.id;
-  //   if (userId == null) return;
-  //   await _uploadReel(userId, pickedBytes);
-  void _onAddMedia() {
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Media upload needs a gallery picker, which is not bundled yet.',
+  // Opens a sheet to attach media. Images are attached to the composed post
+  // (uploaded on Post); videos are uploaded immediately as a reel and the
+  // compose screen closes. Picking is wired via image_picker.
+  Future<void> _onAddMedia() async {
+    final choice = await showModalBottomSheet<_MediaChoice>(
+      context: context,
+      backgroundColor: AppColors.background,
+      builder: (_) => const _MediaPickerSheet(),
+    );
+    if (choice == null || !mounted) return;
+    switch (choice) {
+      case _MediaChoice.photoLibrary:
+        await _pickImage(ImageSource.gallery);
+      case _MediaChoice.photoCamera:
+        await _pickImage(ImageSource.camera);
+      case _MediaChoice.videoLibrary:
+        await _pickVideo(ImageSource.gallery);
+    }
+  }
+
+  /// Picks an image from [source] and stages it as a pending attachment; the
+  /// bytes are uploaded to `post-media` when the user taps Post. Handles the
+  /// user-cancelled case (null) gracefully.
+  Future<void> _pickImage(ImageSource source) async {
+    final XFile? picked = await ImagePicker().pickImage(
+      source: source,
+      imageQuality: 85,
+    );
+    if (picked == null || !mounted) return; // cancelled
+    final bytes = await picked.readAsBytes();
+    if (!mounted) return;
+    setState(() {
+      _pendingImageBytes = bytes;
+      _pendingImageExt = _extensionOf(picked.name);
+    });
+  }
+
+  /// Picks a video from [source], uploads it as a reel, and closes compose.
+  /// Handles the user-cancelled case (null) gracefully.
+  Future<void> _pickVideo(ImageSource source) async {
+    final userId = AuthRepository.instance.currentUser?.id;
+    if (userId == null) return; // must be signed in
+    final XFile? picked = await ImagePicker().pickVideo(source: source);
+    if (picked == null || !mounted) return; // cancelled
+    setState(() => _posting = true);
+    final bytes = await picked.readAsBytes();
+    try {
+      await _uploadReel(userId, bytes);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _posting = false);
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text('Could not upload the video. Please try again.'),
           ),
-        ),
-      );
+        );
+      return;
+    }
+    if (!mounted) return;
+    Navigator.of(context).pop();
+  }
+
+  void _removeImage() {
+    setState(() {
+      _pendingImageBytes = null;
+      _pendingImageExt = 'jpg';
+    });
   }
 
   @override
@@ -197,22 +274,35 @@ class _ComposeScreenState extends State<ComposeScreen> {
                     ),
                     const SizedBox(width: AppSpacing.md),
                     Expanded(
-                      child: TextField(
-                        controller: _controller,
-                        autofocus: true,
-                        maxLines: null,
-                        minLines: 4,
-                        cursorColor: AppColors.accent,
-                        style: AppTextStyles.body.copyWith(fontSize: 18),
-                        decoration: InputDecoration(
-                          filled: false,
-                          border: InputBorder.none,
-                          enabledBorder: InputBorder.none,
-                          focusedBorder: InputBorder.none,
-                          hintText: "What's happening?",
-                          hintStyle: AppTextStyles.handle.copyWith(fontSize: 18),
-                          contentPadding: EdgeInsets.zero,
-                        ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: <Widget>[
+                          TextField(
+                            controller: _controller,
+                            autofocus: true,
+                            maxLines: null,
+                            minLines: 4,
+                            cursorColor: AppColors.accent,
+                            style: AppTextStyles.body.copyWith(fontSize: 18),
+                            decoration: InputDecoration(
+                              filled: false,
+                              border: InputBorder.none,
+                              enabledBorder: InputBorder.none,
+                              focusedBorder: InputBorder.none,
+                              hintText: "What's happening?",
+                              hintStyle:
+                                  AppTextStyles.handle.copyWith(fontSize: 18),
+                              contentPadding: EdgeInsets.zero,
+                            ),
+                          ),
+                          if (_pendingImageBytes != null) ...<Widget>[
+                            const SizedBox(height: AppSpacing.md),
+                            _ImagePreview(
+                              bytes: _pendingImageBytes!,
+                              onRemove: _posting ? null : _removeImage,
+                            ),
+                          ],
+                        ],
                       ),
                     ),
                   ],
@@ -256,9 +346,8 @@ class _Toolbar extends StatelessWidget {
       ),
       child: Row(
         children: <Widget>[
-          // Single media button. The byte source (gallery/camera picker) is the
-          // only unwired step; the upload + persistence path is real. See the
-          // seam documented on _ComposeScreenState._onAddMedia / _uploadReel.
+          // Attach media: opens a picker sheet for a photo (gallery/camera) or
+          // a video (uploaded as a reel). Wired via image_picker.
           IconButton(
             onPressed: onAddMedia,
             icon: const Icon(Icons.image_outlined, color: AppColors.accent),
@@ -275,4 +364,88 @@ class _Toolbar extends StatelessWidget {
       ),
     );
   }
+}
+
+/// The kind of media the user chose from the picker sheet.
+enum _MediaChoice { photoLibrary, photoCamera, videoLibrary }
+
+/// Bottom sheet offering photo (gallery/camera) or video (gallery) sources.
+class _MediaPickerSheet extends StatelessWidget {
+  const _MediaPickerSheet();
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          ListTile(
+            leading: const Icon(Icons.photo_library_outlined,
+                color: AppColors.accent),
+            title: Text('Photo from library', style: AppTextStyles.body),
+            onTap: () =>
+                Navigator.of(context).pop(_MediaChoice.photoLibrary),
+          ),
+          ListTile(
+            leading:
+                const Icon(Icons.photo_camera_outlined, color: AppColors.accent),
+            title: Text('Take a photo', style: AppTextStyles.body),
+            onTap: () => Navigator.of(context).pop(_MediaChoice.photoCamera),
+          ),
+          ListTile(
+            leading: const Icon(Icons.videocam_outlined, color: AppColors.accent),
+            title: Text('Video from library', style: AppTextStyles.body),
+            onTap: () =>
+                Navigator.of(context).pop(_MediaChoice.videoLibrary),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Preview of a staged image attachment with a remove button.
+class _ImagePreview extends StatelessWidget {
+  const _ImagePreview({required this.bytes, required this.onRemove});
+
+  final Uint8List bytes;
+  final VoidCallback? onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      alignment: Alignment.topRight,
+      children: <Widget>[
+        ClipRRect(
+          borderRadius: BorderRadius.circular(AppSpacing.md),
+          child: Image.memory(
+            bytes,
+            width: double.infinity,
+            fit: BoxFit.cover,
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.all(AppSpacing.sm),
+          child: Material(
+            color: Colors.black54,
+            shape: const CircleBorder(),
+            child: IconButton(
+              onPressed: onRemove,
+              icon: const Icon(Icons.close, color: AppColors.white, size: 18),
+              tooltip: 'Remove',
+              visualDensity: VisualDensity.compact,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Returns a lowercase file extension for [fileName] (without the dot),
+/// defaulting to `jpg` when there is none. Used to key uploaded images.
+String _extensionOf(String fileName) {
+  final dot = fileName.lastIndexOf('.');
+  if (dot < 0 || dot == fileName.length - 1) return 'jpg';
+  return fileName.substring(dot + 1).toLowerCase();
 }

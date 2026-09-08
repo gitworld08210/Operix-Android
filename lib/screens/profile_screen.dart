@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../data/auth_repository.dart';
 import '../data/message_repository.dart';
 import '../data/post_repository.dart';
 import '../data/profile_repository.dart';
+import '../data/storage_service.dart';
 import '../models/post.dart';
 import '../models/user_profile.dart';
 import '../theme/app_colors.dart';
@@ -16,6 +18,14 @@ import '../widgets/verified_badge.dart';
 import 'bookmarks_screen.dart';
 import 'conversation_screen.dart';
 import 'post_detail_screen.dart';
+
+/// Returns a lowercase file extension for [fileName] (without the dot),
+/// defaulting to `jpg` when there is none. Used to key uploaded images.
+String _extensionOf(String fileName) {
+  final dot = fileName.lastIndexOf('.');
+  if (dot < 0 || dot == fileName.length - 1) return 'jpg';
+  return fileName.substring(dot + 1).toLowerCase();
+}
 
 /// Profile screen with a banner, overlapping avatar, bio + counts, and
 /// Posts / Media tabs. Supabase-backed for ANY profile: the current user gets
@@ -113,6 +123,43 @@ class _ProfileScreenState extends State<ProfileScreen>
     );
   }
 
+  /// Picks an image from the gallery, uploads it to the `avatars` bucket, and
+  /// persists the returned public URL onto `profiles.avatar_url` (then the
+  /// header reflects it via the repository's notifyListeners). Handles the
+  /// user-cancelled case (null) gracefully and surfaces failures.
+  Future<void> _changeAvatar() async {
+    final userId = AuthRepository.instance.currentUser?.id;
+    if (userId == null) return;
+    final messenger = ScaffoldMessenger.of(context);
+
+    final XFile? picked = await ImagePicker().pickImage(
+      source: ImageSource.gallery,
+      imageQuality: 85,
+    );
+    if (picked == null) return; // user cancelled
+
+    final bytes = await picked.readAsBytes();
+    final ext = _extensionOf(picked.name);
+    try {
+      final url = await StorageService.uploadAvatar(
+        userId: userId,
+        bytes: bytes,
+        ext: ext,
+      );
+      await ProfileRepository.instance.updateProfile(avatarUrl: url);
+      // Refresh so the persisted avatar_url is authoritative across screens.
+      // ignore: discarded_futures
+      ProfileRepository.instance.load();
+    } catch (_) {
+      if (!mounted) return;
+      messenger
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(content: Text('Could not update your photo.')),
+        );
+    }
+  }
+
   void _openBookmarks() {
     Navigator.of(context).push(
       MaterialPageRoute<void>(
@@ -162,6 +209,7 @@ class _ProfileScreenState extends State<ProfileScreen>
                   profile: live,
                   isCurrentUser: _isCurrentUser,
                   onEdit: _editProfile,
+                  onChangeAvatar: _changeAvatar,
                 );
               },
             ),
@@ -246,11 +294,13 @@ class _ProfileHeader extends StatelessWidget {
     required this.profile,
     required this.isCurrentUser,
     required this.onEdit,
+    required this.onChangeAvatar,
   });
 
   final UserProfile profile;
   final bool isCurrentUser;
   final VoidCallback onEdit;
+  final Future<void> Function() onChangeAvatar;
 
   @override
   Widget build(BuildContext context) {
@@ -270,12 +320,17 @@ class _ProfileHeader extends StatelessWidget {
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               crossAxisAlignment: CrossAxisAlignment.end,
               children: <Widget>[
-                Avatar(
-                  url: profile.avatarUrl,
-                  displayName: profile.displayName,
-                  size: 72,
-                  ring: true,
-                ),
+                isCurrentUser
+                    ? _EditableAvatar(
+                        profile: profile,
+                        onChangeAvatar: onChangeAvatar,
+                      )
+                    : Avatar(
+                        url: profile.avatarUrl,
+                        displayName: profile.displayName,
+                        size: 72,
+                        ring: true,
+                      ),
                 Padding(
                   padding: const EdgeInsets.only(bottom: 4),
                   child: isCurrentUser
@@ -335,18 +390,83 @@ class _ProfileHeader extends StatelessWidget {
   }
 }
 
+/// The current user's avatar with a tap-to-change affordance (camera badge).
+/// Tapping runs [onChangeAvatar], which picks + uploads a new photo.
+class _EditableAvatar extends StatefulWidget {
+  const _EditableAvatar({
+    required this.profile,
+    required this.onChangeAvatar,
+  });
+
+  final UserProfile profile;
+  final Future<void> Function() onChangeAvatar;
+
+  @override
+  State<_EditableAvatar> createState() => _EditableAvatarState();
+}
+
+class _EditableAvatarState extends State<_EditableAvatar> {
+  bool _busy = false;
+
+  Future<void> _onTap() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      await widget.onChangeAvatar();
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: _busy ? null : _onTap,
+      child: Stack(
+        alignment: Alignment.bottomRight,
+        children: <Widget>[
+          Avatar(
+            url: widget.profile.avatarUrl,
+            displayName: widget.profile.displayName,
+            size: 72,
+            ring: true,
+          ),
+          Container(
+            padding: const EdgeInsets.all(4),
+            decoration: const BoxDecoration(
+              color: AppColors.accent,
+              shape: BoxShape.circle,
+            ),
+            child: _busy
+                ? const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: AppColors.white,
+                    ),
+                  )
+                : const Icon(
+                    Icons.camera_alt,
+                    size: 14,
+                    color: AppColors.white,
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _EditButton extends StatelessWidget {
   const _EditButton({required this.onEdit});
 
   final VoidCallback onEdit;
 
-  // Editing name/bio persists through ProfileRepository.updateProfile.
-  // Avatar upload is a documented byte-source seam: once raw bytes are picked
-  // (no image_picker dependency is bundled under INTEGRATIONS_ONLY), call
-  //   final userId = AuthRepository.instance.currentUser?.id;
-  //   final url = await StorageService.uploadAvatar(userId: id, bytes: bytes);
-  // then persist url onto profiles.avatar_url and reload. Wiring a picker is
-  // the only remaining step.
+  // Editing name/bio persists through ProfileRepository.updateProfile. The
+  // avatar is changed by tapping the header photo (see _EditableAvatar), which
+  // picks an image, uploads it via StorageService.uploadAvatar, and persists
+  // the returned URL onto profiles.avatar_url.
   @override
   Widget build(BuildContext context) {
     return OutlinedButton(

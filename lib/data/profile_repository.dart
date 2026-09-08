@@ -228,9 +228,15 @@ class ProfileRepository extends ChangeNotifier {
     }
   }
 
-  /// Updates the current user's editable fields, optimistically in memory and
-  /// then persisted. Reverts on failure. No-op when signed out.
-  Future<void> updateProfile({String? displayName, String? bio}) async {
+  /// Updates the current user's editable fields ([displayName], [bio],
+  /// [avatarUrl]), optimistically in memory and then persisted. Reverts on
+  /// failure. No-op when signed out. Never writes the DB-owned follower /
+  /// following counters.
+  Future<void> updateProfile({
+    String? displayName,
+    String? bio,
+    String? avatarUrl,
+  }) async {
     final current = _currentUser;
     if (current == null) return;
     final myId = supabase.auth.currentUser?.id;
@@ -239,10 +245,15 @@ class ProfileRepository extends ChangeNotifier {
     final changes = <String, dynamic>{
       if (displayName != null) 'display_name': displayName,
       if (bio != null) 'bio': bio,
+      if (avatarUrl != null) 'avatar_url': avatarUrl,
     };
     if (changes.isEmpty) return;
 
-    _currentUser = current.copyWith(displayName: displayName, bio: bio);
+    _currentUser = current.copyWith(
+      displayName: displayName,
+      bio: bio,
+      avatarUrl: avatarUrl,
+    );
     notifyListeners();
 
     try {

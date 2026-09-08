@@ -7,6 +7,8 @@ Oneleven is dark-first: true-black background, X-blue accent (`#1D9BF0`), clean 
 ## Status
 
 > **Not compiled in this environment.** This project was authored **by hand without an available Flutter/Dart/Android toolchain and with no network access**, so it has **not** been compiled, analyzed, or run in-sandbox. A developer must run `flutter pub get` and `flutter run` on a Flutter-equipped machine to build, verify, and launch it. Every file was written and cross-checked manually; treat the first real `flutter analyze` as the source of truth.
+>
+> **CI builds the APK.** A GitHub Actions workflow (`.github/workflows/android.yml`) runs `flutter pub get` / `analyze` / `test` and `flutter build apk --release` on every push and pull request (and via manual dispatch), then uploads the APK as a downloadable build artifact (`oneleven-release-apk`). It needs no secrets: `lib/supabase_config.dart` bakes in the public Supabase URL + publishable key defaults (optional `SUPABASE_URL` / `SUPABASE_ANON_KEY` repo secrets override them via `--dart-define`). This is where the APK actually compiles. See [Building the APK](#building-the-apk).
 
 The app is a fully Supabase-backed social app. It was built across an initial UI/backend pass and then a de-mock rebuild that removed the last of the in-memory sample data:
 
@@ -41,17 +43,40 @@ oneleven_app/
 - **PostCard** mirroring the web design: avatar + content columns, bold display name + verification badge + `@handle` + relative time + more menu, `#hashtag` / `@mention` linkification in X-blue, "Show more" truncation, optional rounded media (image, or a play-icon placeholder for video), and the full action row (Reply, Repost, Like, Views, Bookmark, Share). Tapping a post opens the **post detail**; tapping an author opens their real profile. All `Image.network` calls have loading + error fallbacks so a blocked network never crashes the app.
 - **Post detail + replies** (`post_detail_screen.dart`): the parent post plus its threaded replies (`PostRepository.replies`) with loading/empty/error, and a reply composer that inserts a real reply (`addReply`, sets `parent_id`); the parent `reply_count` follows the DB trigger. **Share** copies a post link to the clipboard (pure Flutter SDK, no share package).
 - **Search / Explore:** a debounced field backed by the DB. People come from the `search_profiles` RPC and posts from the `search_posts` RPC; results navigate to real profiles / post detail. The idle state shows suggested people to follow. Real loading / no-results / error states. **No fabricated trends.**
-- **Compose:** author avatar, multiline field, a single media button documented as the byte-source seam, character counter, and a Post button that inserts a real `posts` row and then reloads the feed so DB defaults/counters are authoritative.
+- **Compose:** author avatar, multiline field, a media button that attaches a photo (gallery/camera) or a video (uploaded as a reel) via `image_picker`, an image preview, character counter, and a Post button that uploads any attached image to the `post-media` bucket then inserts a real `posts` row (with `media_url` / `media_type`) and reloads the feed so DB defaults/counters are authoritative.
 - **Notifications:** typed activity rows (like / reply / repost / follow / mention) from the `notifications` table with unread highlighting, real "Mark all read" (a DB update), tap-to-navigate to the target post/profile, and live realtime inserts.
 - **Messages + Conversation:** the thread list and chat view read/write the `conversations` / `conversation_participants` / `messages` tables. Sending inserts a real message row (preview/updated_at/unread are trigger-maintained); bubble side derives from `Message.fromMe`; a **Message** button on other users' profiles starts a new DM. Realtime keeps threads and unread badges live.
 - **Bookmarks** (`bookmarks_screen.dart`): the signed-in user's bookmarked posts, reachable from their profile.
-- **Profile:** Supabase-backed for **any** user: banner, overlapping avatar, name + badge, bio, follower/following counts, a real Follow/Following button (`toggleFollow`) for other users or Edit profile (name/bio persist) for the current user, and Posts / Media tabs reading that profile's real posts.
+- **Profile:** Supabase-backed for **any** user: banner, overlapping avatar, name + badge, bio, follower/following counts, a real Follow/Following button (`toggleFollow`) for other users or Edit profile (name/bio persist) plus tap-to-change avatar (picked via `image_picker`, uploaded to the `avatars` bucket) for the current user, and Posts / Media tabs reading that profile's real posts.
 
-**Out of scope for this Android app (not built):** Wallet, Premium, Verification purchase flow, Creator Hub, and Live. The **only** remaining scaffold is the raw media byte source (gallery/camera picker); see [Media upload note](#media-upload-note). There are no mock placeholders and no "not available in this demo" snackbars for the core feed / reply / share / follow / search / DM actions.
+**Out of scope for this Android app (not built):** Wallet, Premium, Verification purchase flow, Creator Hub, and Live. Media picking (avatar / post image / reel video) is now fully wired via `image_picker`; see [Media upload note](#media-upload-note). There are no mock placeholders and no "not available in this demo" snackbars for the core feed / reply / share / follow / search / DM actions.
 
 ## Web-only surfaces (excluded from Android)
 
 **Ads Manager** and **Admin-OS** are **web-only** and are intentionally **not** part of this Android Flutter app. They remain in the React/Vite web project only.
+
+## Building the APK
+
+Locally, on a Flutter-equipped machine (Flutter `>=3.22`, Dart `>=3.3`, JDK 17
+for the Android toolchain):
+
+```sh
+flutter pub get
+flutter analyze
+flutter test
+flutter build apk --release
+# output: build/app/outputs/flutter-apk/app-release.apk
+```
+
+The release build is debug-signed (see `android/app/build.gradle`), so it
+produces an installable APK without any signing secrets. Supabase config has
+public defaults baked into `lib/supabase_config.dart`; override them if needed
+with `--dart-define=SUPABASE_URL=... --dart-define=SUPABASE_ANON_KEY=...`.
+
+In CI, `.github/workflows/android.yml` runs the same steps on every push /
+pull request (and on manual `workflow_dispatch`) and publishes the APK as the
+`oneleven-release-apk` artifact on the workflow run, so you can download it
+straight from the GitHub Actions tab without a local toolchain.
 
 ## Palette
 
@@ -210,12 +235,14 @@ shows a previous user's cache.
   `resetUnread`. `Message.fromMe` is derived by comparing `messages.sender` to
   the current auth uid. `last_preview` / `updated_at` / `unread` are
   trigger-maintained.
-- **`reels`** — the reel-compose flow uploads the video to the `reels` bucket
-  and inserts a first-class row into the **`reels` table** via
-  `StorageService.insertReel`, then surfaces the reel as a video post. Wiring a
-  gallery/camera picker (the raw byte source) is the only remaining step.
-- **Storage** — `StorageService.uploadAvatar` (bucket `avatars`) and
-  `StorageService.uploadReel` (bucket `reels`).
+- **`reels`** — the reel-compose flow picks a video with `image_picker`,
+  uploads it to the `reels` bucket, and inserts a first-class row into the
+  **`reels` table** via `StorageService.insertReel`, then surfaces the reel as a
+  video post.
+- **Storage** — `StorageService.uploadAvatar` (bucket `avatars`),
+  `StorageService.uploadReel` (bucket `reels`), and
+  `StorageService.uploadPostImage` (bucket `post-media`, for images attached to
+  posts).
 
 ### Backend schema extension — `0002_backend.sql` / `0003_harden_functions.sql`
 
@@ -284,18 +311,28 @@ the MCP tooling because the tests never boot a Supabase client.
 
 ### Media upload note
 
-**No image/file-picker package is bundled**, and one could not be added in the
-build environment: this app was assembled with **repository access only
-(INTEGRATIONS_ONLY)**, so `pub.dev` was unreachable and packages such as
-`image_picker` / `file_picker` could not be fetched. Media, avatar, and reel
-picking are therefore left as a clearly-defined **byte-source seam**:
-`StorageService` provides the upload helpers, and there are marked call sites
-(`compose_screen.dart` for reels/photos, `profile_screen.dart` for avatars).
-The **only** missing piece is the raw byte source (gallery/camera). For reels
-the rest of the flow is real: once bytes are supplied, `_uploadReel` uploads to
-the `reels` bucket, inserts a row into the `reels` table
-(`StorageService.insertReel`), and surfaces the reel as a video post; adding a
-picker on a networked machine is the single remaining wiring step.
+Media picking is now **fully wired** with the [`image_picker`](https://pub.dev/packages/image_picker)
+package (`^1.1.2`), so the previous byte-source seam is closed:
+
+- **Avatar** (`profile_screen.dart`) — tapping the current user's profile photo
+  opens the gallery, uploads the picked image via `StorageService.uploadAvatar`
+  (bucket `avatars`), and persists the returned public URL onto
+  `profiles.avatar_url` through `ProfileRepository.updateProfile(avatarUrl:)`,
+  then reloads the profile.
+- **Post image** (`compose_screen.dart`) — the media button offers a photo
+  (gallery or camera); the picked image is previewed, then uploaded to the
+  dedicated public **`post-media`** bucket via
+  `StorageService.uploadPostImage` on Post, and the post row is created with
+  `media_url` + `media_type = image`.
+- **Reel video** (`compose_screen.dart`) — picking a video (gallery) uploads it
+  to the `reels` bucket, inserts a first-class row into the `reels` table
+  (`StorageService.insertReel`), and surfaces it as a video post.
+
+The `post-media` bucket is created by `supabase/migrations/0008_post_media_bucket.sql`
+with owner-scoped write RLS (objects keyed `<userId>/<file>`) mirroring the
+`avatars` / `reels` buckets; reads are public via the CDN. Android permissions
+for camera capture (`CAMERA`) and Android 13+ media reads
+(`READ_MEDIA_IMAGES` / `READ_MEDIA_VIDEO`) are declared in the manifest.
 
 ## Tests
 

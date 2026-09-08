@@ -1,5 +1,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- image_picker: capturing a photo/video with the camera. -->
+    <uses-permission android:name="android.permission.CAMERA"/>
+    <!-- image_picker: reading media from the gallery on Android 13+ (API 33).
+         Older APIs fall back to the system picker and need no runtime grant. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
 
     <application
         android:label="Oneleven"

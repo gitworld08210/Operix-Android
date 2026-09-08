@@ -1,0 +1,72 @@
+name: Android APK
+
+# Builds the Flutter Android APK on pushes and pull requests and uploads it as
+# a downloadable build artifact. The app's Supabase config has public defaults
+# baked into lib/supabase_config.dart (String.fromEnvironment), so the build
+# needs NO secrets to produce a working APK. If SUPABASE_URL / SUPABASE_ANON_KEY
+# repository secrets are configured, they are passed via --dart-define to
+# override the defaults; otherwise the defaults are used.
+on:
+  push:
+    branches:
+      - main
+      - feat/supabase-backend-extension
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    name: Build release APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Flutter's Android toolchain targets JDK 17 (not newer). Temurin 17.
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: "3.24.0"
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      # Run analyze so lint/analysis failures surface in CI.
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        run: flutter test
+
+      # Build the release APK. Release is debug-signed in android/app/build.gradle
+      # so this produces an installable artifact without any signing secrets.
+      # Pass Supabase config from secrets only when present; the app has public
+      # defaults baked in, so the build works with no secrets configured.
+      - name: Build release APK
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          DART_DEFINES=""
+          if [ -n "$SUPABASE_URL" ]; then
+            DART_DEFINES="$DART_DEFINES --dart-define=SUPABASE_URL=$SUPABASE_URL"
+          fi
+          if [ -n "$SUPABASE_ANON_KEY" ]; then
+            DART_DEFINES="$DART_DEFINES --dart-define=SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY"
+          fi
+          flutter build apk --release $DART_DEFINES
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: oneleven-release-apk
+          path: build/app/outputs/flutter-apk/*.apk
+          if-no-files-found: error
