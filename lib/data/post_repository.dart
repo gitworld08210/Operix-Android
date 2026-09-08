@@ -218,6 +218,12 @@ class PostRepository extends ChangeNotifier {
   /// against a real Supabase (env risk) and validated by structural review.
   Future<FeedPage> loadMoreFollowing(FeedCursor cursor) async {
     try {
+      // A genuinely-empty follow set is legitimate end-of-feed
+      // ([FeedPage.empty]); a FAILED follows lookup (when Supabase is
+      // initialized) throws out of [_followedAuthorIds] and is caught below,
+      // routing to [_errorOrEmpty] so the retry footer fires instead of a
+      // false "You're all caught up". Under tests/offline the lookup returns
+      // empty (no throw), keeping the guarded no-throw contract intact.
       final authorIds = await _followedAuthorIds();
       if (authorIds.isEmpty) return FeedPage.empty;
       final rows = await supabase
@@ -270,10 +276,21 @@ class PostRepository extends ChangeNotifier {
 
   /// The set of author ids the viewer follows, used to scope
   /// [loadMoreFollowing]. Reads the `follows` table (accepted edges) when
-  /// Supabase is reachable; guarded so it returns an EMPTY set under
-  /// tests/offline (making [loadMoreFollowing] a no-op there), mirroring how
-  /// the synchronous [following] getter derives its subset from MockData.
+  /// Supabase is reachable.
+  ///
+  /// FAILURE vs EMPTY: this distinguishes an uninitialized-client no-op from a
+  /// real lookup failure so the Following pager does not fail OPEN to
+  /// end-of-feed. When Supabase is NOT initialized (tests/offline) it returns
+  /// an EMPTY set (a no-op) that keeps the guarded no-throw contract and the
+  /// offline pagination tests intact, mirroring how the synchronous [following]
+  /// getter derives its subset from MockData. When the client IS initialized
+  /// but the `follows` query THROWS, the error is RETHROWN so the caller's
+  /// guard routes to [_errorOrEmpty] ([FeedPage.failure], the retry path),
+  /// rather than being swallowed into an empty set that would look identical to
+  /// "follows nobody". A no-authenticated-user is treated as a legitimately
+  /// empty follow set.
   Future<Set<String>> _followedAuthorIds() async {
+    if (!isSupabaseInitialized) return const <String>{};
     try {
       final userId = supabase.auth.currentUser?.id;
       if (userId == null) return const <String>{};
@@ -287,7 +304,10 @@ class PostRepository extends ChangeNotifier {
           .where((id) => id.isNotEmpty)
           .toSet();
     } catch (_) {
-      return const <String>{};
+      // Initialized but the query failed (network/query error): surface it as a
+      // real failure so [loadMoreFollowing] returns [FeedPage.failure] and the
+      // UI shows a retry, instead of a false end-of-feed.
+      rethrow;
     }
   }
 

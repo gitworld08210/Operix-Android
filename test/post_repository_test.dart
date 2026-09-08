@@ -741,18 +741,59 @@ void main() {
     });
 
     test(
-        'loadMoreFollowing returns FeedPage.empty when Supabase is unavailable',
-        () async {
+        'loadMoreFollowing returns FeedPage.empty (not failure) when Supabase '
+        'is unavailable', () async {
+      // The Following pager scopes to followed authors via a guarded `follows`
+      // lookup. Under an UNINITIALIZED client that lookup is a no-op returning
+      // an empty follow set, so the pager must return FeedPage.empty — NOT
+      // FeedPage.failure. This is the load-bearing distinction behind the
+      // review follow-up: only an initialized-but-throwing follows fetch should
+      // surface as a failure (the retry path); an empty/offline follow set is a
+      // legitimate end-of-feed. Proving `error` is false here guards against a
+      // regression that would fail the offline pager open to a retry footer (or
+      // vice versa, fail a real failure closed to "all caught up").
       final page = await repo.loadMoreFollowing(cursor(repo));
       expect(page.posts, isEmpty);
       expect(page.hasMore, isFalse);
-      expect(page.error, isFalse);
+      expect(page.error, isFalse, reason: 'offline follow set is empty, not a '
+          'failure — must not surface the retry footer');
     });
 
     test('loadMore does not throw and leaves the cache unchanged', () async {
       final before = repo.forYou().length;
       await repo.loadMore(cursor(repo));
       expect(repo.forYou().length, before);
+    });
+
+    test('loadMoreFollowing does not throw and leaves the cache unchanged',
+        () async {
+      // Companion to the loadMore no-throw guard: the Following pager (whose
+      // follows lookup now RETHROWS a real query failure so the caller can
+      // route it to FeedPage.failure) must STILL be a silent no-op offline —
+      // the follows lookup returns empty before any throw can escape.
+      final before = repo.forYou().length;
+      await repo.loadMoreFollowing(cursor(repo));
+      expect(repo.forYou().length, before);
+    });
+  });
+
+  group('FeedPage failure-vs-empty distinction (Following pager)', () {
+    // The Following pager must map a genuinely-empty follow set to
+    // FeedPage.empty (end-of-feed) and a real follows-fetch failure to
+    // FeedPage.failure (retry). We can't drive a live throwing `follows` query
+    // without a backend, but we can pin the two target FeedPage shapes the
+    // pager selects between so the semantics stay explicit and any future
+    // refactor that conflates them fails here.
+    test('FeedPage.empty is end-of-feed with no error/retry', () {
+      expect(FeedPage.empty.error, isFalse);
+      expect(FeedPage.empty.hasMore, isFalse);
+      expect(FeedPage.empty.posts, isEmpty);
+    });
+
+    test('FeedPage.failure signals a retriable error, not end-of-feed', () {
+      expect(FeedPage.failure.error, isTrue);
+      expect(FeedPage.failure.hasMore, isTrue);
+      expect(FeedPage.failure.posts, isEmpty);
     });
   });
 }

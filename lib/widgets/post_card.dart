@@ -788,8 +788,15 @@ class QuotedEmbedCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final author = quoted.author;
     final content = quoted.content;
-    final shown = content.length > _captionTruncateAt
-        ? '${content.substring(0, _captionTruncateAt).trimRight()}…'
+    // Truncate over GRAPHEME CLUSTERS (via the `.characters` extension
+    // re-exported from package:flutter/widgets.dart, itself re-exported by
+    // material.dart) rather than UTF-16 code units, matching how
+    // validateTextPost and the composer counter measure length. This guarantees
+    // a multi-code-unit character (emoji, combining mark, surrogate pair) at
+    // the 140 boundary is never split into a broken glyph.
+    final characters = content.characters;
+    final shown = characters.length > _captionTruncateAt
+        ? '${characters.take(_captionTruncateAt).toString().trimRight()}…'
         : content;
     return InkWell(
       onTap: onTap,
