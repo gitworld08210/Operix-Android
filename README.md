@@ -118,6 +118,59 @@ trigger (`sync_post_like_count`) that keeps `posts.like_count` in sync with the
 `likes` table, and the public `avatars` and `reels` storage buckets with
 owner-scoped write policies.
 
+#### Migration 0002 (authorization + core tables)
+
+After 0001, run [`supabase/migrations/0002_authz_and_core_tables.sql`](supabase/migrations/0002_authz_and_core_tables.sql)
+the same way (SQL Editor → New query → paste → Run). It **must be applied after
+0001** and is **idempotent / re-runnable** (every statement uses
+`if not exists` / `drop ... if exists` / `on conflict do nothing` / a guarded
+`DO` block), so re-running it is safe. It adds:
+
+- **New tables:** `comments` (post replies, with a server-owned `reply_count`),
+  `notifications` (centralized activity feed), `reposts` (a like-style join
+  table), and `blocks` (mutual blocking). It also adds `profiles.is_private`
+  (private accounts) and `follows.status` (`'pending' | 'accepted'` follow
+  requests).
+- **Server-authoritative read authorization (privacy + blocking).** 0001 let
+  **any** authenticated user read **every** row (`*_select_authenticated using
+  (true)`) — an IDOR/privacy gap. 0002 replaces those permissive SELECT
+  policies with ones that call two `SECURITY DEFINER` helpers:
+  `is_blocked(a, b)` (true if either user has blocked the other) and
+  `can_view_profile(viewer, target)` (true for yourself, or when neither has
+  blocked the other **and** the target is public **or** the viewer has an
+  `'accepted'` follow). `profiles`/`posts`/`reels`/`comments`/`reposts`/`likes`
+  SELECT visibility now flows through these helpers, so privacy and blocking are
+  enforced **in the database**, not trusted to the client. The owner-scoped
+  insert/update/delete policies from 0001 are unchanged.
+- **Follow requests.** A follow of a **public** account is created as
+  `'accepted'`; a follow of a **private** account is created by the client as
+  `'pending'` and flipped to `'accepted'` by the followee. Private content only
+  becomes visible once the follow is `'accepted'` (the Dart change to create
+  `'pending'` follows lands in a later increment).
+- **Notifications via triggers (not client inserts).** There is deliberately
+  **no** client insert policy on `notifications`; letting authenticated users
+  insert arbitrary `recipient` rows would allow spoofed notifications.
+  Notifications are produced **only** by `SECURITY DEFINER` triggers on
+  like/comment/repost/follow inserts, each guarding against self-notification
+  (`actor <> recipient`) and against blocked actors.
+- **Server-owned counters.** `posts.reply_count` and `posts.repost_count` are
+  now recomputed by triggers (`sync_post_reply_count`, `sync_post_repost_count`)
+  from `count(*)` of the `comments` / `reposts` tables, mirroring
+  `sync_post_like_count`. This retires the client-write `repost_count` drift
+  debt documented in 0001. The client stops writing these counts in a later
+  increment.
+- **Indexes** for high-frequency queries and keyset-pagination-friendly
+  ordering (`posts(owner)`, `posts(created_at desc)`, a composite
+  `posts(created_at desc, id)` for keyset pagination, `comments(post_id,
+  created_at)`, `likes(post_id)`, `reposts(post_id)`, `follows(follower,
+  status)`, `follows(followee, status)`, `notifications(recipient, created_at
+  desc)`, `blocks(blocked)`).
+
+> **Unverified in this environment.** 0002 was authored and structurally
+> reviewed by hand; there is no reachable Supabase project in this sandbox, so
+> its live application and runtime RLS/trigger behavior have **not** been
+> executed. Apply and exercise it against a real project before relying on it.
+
 **Storage read model:** both buckets are intentionally `public: true`. The app
 loads media with plain URL fetches (`Image.network`, video URLs) using
 `getPublicUrl()`, which serves objects over the public CDN path. Because that
@@ -190,17 +243,22 @@ flow used here.
   `StorageService.uploadReel` (bucket `reels`) via `uploadBinary` +
   `getPublicUrl`.
 
-> **`repost_count` limitation:** there is no `reposts` join table, so
-> `repost_count` is still written from the client (`_persistRepostCount`) and
-> can drift under concurrent clients (last-writer-wins). A production version
-> should add a `reposts` join table plus a trigger mirroring
-> `sync_post_like_count`. This is intentionally deferred to keep the schema
-> scope minimal for this pass (documented in `0001_init.sql` and the code).
+> **`repost_count` / `reply_count` are now server-owned (migration 0002).**
+> Migration 0002 adds a `reposts` join table and a `comments` table, plus
+> triggers (`sync_post_repost_count`, `sync_post_reply_count`) that recompute
+> `posts.repost_count` / `posts.reply_count` from `count(*)`, mirroring
+> `sync_post_like_count`. This retires the client-write `repost_count` drift
+> debt that 0001 documented. The Dart client still writes `repost_count`
+> optimistically for now; the change to stop writing it (and to insert/delete on
+> `reposts` instead) lands in a later increment. Once 0002 is applied and that
+> client change ships, the counters are drift-free under concurrent clients.
 
 **Still mock (`lib/data/mock_data.dart`):**
 
 - Notifications (`ProfileRepository.notifications()` / `unreadNotifications` /
-  `markNotificationsRead`) — no notifications table yet.
+  `markNotificationsRead`) — the `notifications` table + producer triggers exist
+  after migration 0002, but the Dart client still reads from mock data; wiring
+  the repository to the table lands in a later increment.
 - Conversations / direct messages (`conversations()` / `unreadMessages` /
   `conversationById`) — no messaging table yet.
 
