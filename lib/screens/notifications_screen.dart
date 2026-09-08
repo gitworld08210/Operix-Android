@@ -34,12 +34,46 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
         animation: ProfileRepository.instance,
         builder: (context, _) {
           final items = ProfileRepository.instance.notifications();
+          if (items.isEmpty) {
+            return const _EmptyNotifications();
+          }
           return ListView.separated(
             itemCount: items.length,
             separatorBuilder: (_, __) => const Divider(height: 0.5),
             itemBuilder: (context, index) => _NotificationTile(item: items[index]),
           );
         },
+      ),
+    );
+  }
+}
+
+class _EmptyNotifications extends StatelessWidget {
+  const _EmptyNotifications();
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(AppSpacing.xxl),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            const Icon(
+              Icons.notifications_none,
+              size: 44,
+              color: AppColors.secondaryText,
+            ),
+            const SizedBox(height: AppSpacing.md),
+            Text('No notifications yet', style: AppTextStyles.title),
+            const SizedBox(height: AppSpacing.xs),
+            Text(
+              'Likes, replies, reposts, and follows will show up here.',
+              textAlign: TextAlign.center,
+              style: AppTextStyles.handle,
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -62,6 +96,10 @@ class _NotificationTile extends StatelessWidget {
         return Icons.person_add;
       case NotificationType.mention:
         return Icons.alternate_email;
+      case NotificationType.followRequest:
+        return Icons.person_add_alt_1;
+      case NotificationType.system:
+        return Icons.campaign;
     }
   }
 
@@ -74,7 +112,10 @@ class _NotificationTile extends StatelessWidget {
       case NotificationType.reply:
       case NotificationType.follow:
       case NotificationType.mention:
+      case NotificationType.followRequest:
         return AppColors.accent;
+      case NotificationType.system:
+        return AppColors.secondaryText;
     }
   }
 

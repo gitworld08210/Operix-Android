@@ -3,6 +3,25 @@ import 'package:oneleven/data/mock_data.dart';
 import 'package:oneleven/data/post_repository.dart';
 import 'package:oneleven/models/post.dart';
 
+/// A representative `posts` row (with joined `profiles(*)`) as PostgREST would
+/// return it, used to exercise the row->model mapping directly.
+Map<String, dynamic> _row(String id) => <String, dynamic>{
+      'id': id,
+      'content': 'hello',
+      'media_url': null,
+      'media_type': 'none',
+      'created_at': '2024-01-01T00:00:00.000Z',
+      'reply_count': 2,
+      'repost_count': 3,
+      'like_count': 4,
+      'view_count': 5,
+      'profiles': <String, dynamic>{
+        'id': 'author-1',
+        'username': 'ada',
+        'display_name': 'Ada',
+      },
+    };
+
 void main() {
   // Use a fresh repository per test so the shared singleton's mutable state
   // never leaks between cases.
@@ -147,6 +166,67 @@ void main() {
         ),
       );
       expect(notified, 1);
+    });
+  });
+
+  group('mapPostRow', () {
+    test('maps server-owned counts and author from the row', () {
+      final post = PostRepository.mapPostRow(_row('p1'));
+      expect(post.id, 'p1');
+      expect(post.content, 'hello');
+      expect(post.author.id, 'author-1');
+      expect(post.author.username, 'ada');
+      expect(post.replyCount, 2);
+      expect(post.repostCount, 3);
+      expect(post.likeCount, 4);
+      expect(post.viewCount, 5);
+    });
+
+    test('defaults liked/reposted to false without viewer engagement', () {
+      final post = PostRepository.mapPostRow(_row('p1'));
+      expect(post.liked, isFalse);
+      expect(post.reposted, isFalse);
+    });
+
+    test('hydrates liked when the row id is in the viewer like set', () {
+      final post = PostRepository.mapPostRow(
+        _row('p1'),
+        likedIds: <String>{'p1', 'other'},
+      );
+      expect(post.liked, isTrue);
+      expect(post.reposted, isFalse);
+    });
+
+    test('hydrates reposted when the row id is in the viewer repost set', () {
+      final post = PostRepository.mapPostRow(
+        _row('p1'),
+        repostedIds: <String>{'p1'},
+      );
+      expect(post.reposted, isTrue);
+      expect(post.liked, isFalse);
+    });
+
+    test('hydrates both flags independently and leaves counts untouched', () {
+      final post = PostRepository.mapPostRow(
+        _row('p1'),
+        likedIds: <String>{'p1'},
+        repostedIds: <String>{'p1'},
+      );
+      expect(post.liked, isTrue);
+      expect(post.reposted, isTrue);
+      // Per-viewer state must not alter the server-owned counts.
+      expect(post.likeCount, 4);
+      expect(post.repostCount, 3);
+    });
+
+    test('does not hydrate flags for a row id absent from the sets', () {
+      final post = PostRepository.mapPostRow(
+        _row('p2'),
+        likedIds: <String>{'p1'},
+        repostedIds: <String>{'p1'},
+      );
+      expect(post.liked, isFalse);
+      expect(post.reposted, isFalse);
     });
   });
 }
