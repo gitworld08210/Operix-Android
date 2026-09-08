@@ -1,3 +1,6 @@
+# Agent task metadata (planning/review artifacts, not part of the app)
+.agents/
+
 # Miscellaneous
 *.class
 *.log

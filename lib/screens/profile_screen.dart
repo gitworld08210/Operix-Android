@@ -416,29 +416,10 @@ class _ProfileHeader extends StatelessWidget {
                   const SizedBox(height: AppSpacing.sm),
                   Text(profile.bio, style: AppTextStyles.body),
                 ],
-                const SizedBox(height: AppSpacing.sm),
-                // Meta row: only fields that actually exist on UserProfile are
-                // rendered. The model carries no born/joined/location, so we
-                // deliberately omit those rather than fabricate them, showing a
-                // small handle glyph instead.
-                Row(
-                  children: <Widget>[
-                    const Icon(
-                      Icons.alternate_email,
-                      size: 15,
-                      color: AppColors.secondaryText,
-                    ),
-                    const SizedBox(width: 4),
-                    Flexible(
-                      child: Text(
-                        profile.username,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: AppTextStyles.caption,
-                      ),
-                    ),
-                  ],
-                ),
+                // X's header normally carries a born/joined/location meta row,
+                // but UserProfile exposes none of those fields, so we omit the
+                // row entirely rather than fabricate data or repeat the handle
+                // (which is already shown directly above).
                 const SizedBox(height: AppSpacing.sm),
                 Row(
                   children: <Widget>[

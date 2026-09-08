@@ -101,6 +101,14 @@ class AppDrawer extends StatelessWidget {
                       () => _openPlaceholder(context, 'Creator Studio'),
                     ),
                   ),
+                  _DrawerTile(
+                    icon: Icons.auto_awesome_outlined,
+                    label: 'Get Grok',
+                    onTap: () => _closeThen(
+                      context,
+                      () => _openPlaceholder(context, 'Get Grok'),
+                    ),
+                  ),
                   const Divider(),
                   _DrawerTile(
                     icon: Icons.settings_outlined,
