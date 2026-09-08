@@ -47,7 +47,7 @@ oneleven_app/
 - **Notifications:** typed activity rows (like / reply / repost / follow / mention) from the `notifications` table with unread highlighting, real "Mark all read" (a DB update), tap-to-navigate to the target post/profile, and live realtime inserts.
 - **Messages + Conversation:** the thread list and chat view read/write the `conversations` / `conversation_participants` / `messages` tables. Sending inserts a real message row (preview/updated_at/unread are trigger-maintained); bubble side derives from `Message.fromMe`; a **Message** button on other users' profiles starts a new DM. Realtime keeps threads and unread badges live.
 - **Bookmarks** (`bookmarks_screen.dart`): the signed-in user's bookmarked posts, reachable from their profile.
-- **Profile:** Supabase-backed for **any** user: banner, overlapping avatar, name + badge, bio, follower/following counts, a real Follow/Following button (`toggleFollow`) for other users or Edit profile (name/bio persist) plus tap-to-change avatar (picked via `image_picker`, uploaded to the `avatars` bucket) for the current user, and Posts / Media tabs reading that profile's real posts.
+- **Profile:** Supabase-backed for **any** user: banner, large overlapping avatar, name + badge, an own-user "Get verified" pill (honest placeholder, no fake purchase), `@handle`, bio, follower/following counts, and **Posts / Replies / Media** tabs. Own profile shows **Share** (copies a profile link) + **Edit profile** (name/bio persist) plus tap-to-change avatar (picked via `image_picker`, uploaded to the `avatars` bucket); other users show **Message** (starts a real DM) + a magenta **Subscribe**-style button wired to the real `toggleFollow` (`isFollowing` → "Following"). Posts reads `PostRepository.postsByOwner`, Media filters those to media posts, and Replies shows an honest empty state (no per-owner replies query exists). A **Who to follow** footer uses real `suggestedProfiles()` and is omitted when empty.
 
 **Out of scope for this Android app (not built):** Wallet, Premium, Verification purchase flow, Creator Hub, and Live. Media picking (avatar / post image / reel video) is now fully wired via `image_picker`; see [Media upload note](#media-upload-note). There are no mock placeholders and no "not available in this demo" snackbars for the core feed / reply / share / follow / search / DM actions.
 
@@ -78,18 +78,72 @@ pull request (and on manual `workflow_dispatch`) and publishes the APK as the
 `oneleven-release-apk` artifact on the workflow run, so you can download it
 straight from the GitHub Actions tab without a local toolchain.
 
+## X-style UI overhaul
+
+The app was reskinned to faithfully match the real X (Twitter) Android UI while
+keeping every Supabase data path intact (this pass is visual/UX only — no
+repository signatures or data wiring changed):
+
+- **Auth flow** (`auth_screen.dart`) — an X-faithful multi-step welcome →
+  email → 6-digit code flow. The welcome screen leads with the big
+  "See what's happening" headline and pill CTAs; any phone/social affordance
+  honestly routes into the working **email OTP** flow (this app has no
+  SMS/OAuth provider). See [Authentication (email OTP)](#authentication-email-otp).
+- **Bottom navigation** (`widgets/app_scaffold.dart`) — the X 5-slot bar:
+  Home, Search, a center **compose** slot (blue circular `+`), Notifications
+  (with a live unread badge), and Messages. True-black bar, hairline top
+  divider, no elevation.
+- **Left navigation drawer** (`widgets/app_drawer.dart`) — opened from the Home
+  top-bar avatar: header with avatar, name, `@handle`, Following/Followers, then
+  Profile / Premium / Communities / Bookmarks / Lists / Spaces / Creator Studio /
+  Get Grok / Settings / Help entries. Sections without real backends route to a
+  single honest shared [`PlaceholderScreen`] rather than faking functionality.
+- **Profile** (`profile_screen.dart`) — banner + large overlapping avatar;
+  display name with a blue verification check when verified; a **"Get verified"**
+  pill for the current user (routes to the honest placeholder, no fake purchase
+  flow); `@handle`; a small meta row built **only from fields that exist** on
+  `UserProfile` (the model has **no** born/joined/location, so those are
+  deliberately omitted — nothing is fabricated); `N Following  M Followers`.
+  Buttons: own profile shows **Share** (copies a profile link via the clipboard,
+  mirroring `sharePost`) + **Edit profile** (outline); other users show
+  **Message** (outline, starts a real DM) + a filled magenta **Subscribe**-style
+  button wired to the real `toggleFollow`. Tabs are **Posts / Replies / Media**
+  with an accent underline indicator: Posts reads `PostRepository.postsByOwner`,
+  Media filters those to `hasMedia`, and Replies shows a clean "No replies yet"
+  empty state (there is no per-owner replies query in the data layer, so no
+  content is invented). A **Who to follow** footer uses real
+  `ProfileRepository.suggestedProfiles()` and is omitted when there are none.
+- **X post row** (`widgets/post_card.dart`) — avatar on the left; a single
+  header line (bold display name + blue verified check + `@handle` + `·` +
+  relative time + trailing `⋯`); body text with `#hashtag`/`@mention`
+  linkification and "Show more" truncation; optional rounded media; and a
+  full-width action row (Reply, Repost, Like, Views, then Bookmark + Share
+  grouped at the end) with tight spacing and a thin 0.5px bottom divider — no
+  card elevation or shadow. All engagement callbacks
+  (`onLike`/`onRepost`/`onBookmark`/`onReply`/`onShare`/`onTap`/`onAuthorTap`)
+  are preserved.
+- **Floating compose** — the Messages list carries a blue circular FAB
+  (`AppColors.accent`) to start a new DM; it opens Search to find a person
+  (a 1:1 thread is created from that person's profile), so it does not
+  duplicate the center-nav compose (which posts, not DMs).
+- **Consistent language** — search, notifications, messages, conversation,
+  compose, bookmarks, and post-detail all share the same spacing, hairline
+  dividers, pill buttons, avatars, and headers.
+
 ## Palette
 
-| Token          | Hex        |
-| -------------- | ---------- |
-| background     | `#000000`  |
-| surface/hover  | `#16181C`  |
-| border         | `#2F3336`  |
-| primary text   | `#E7E9EA`  |
-| secondary text | `#71767B`  |
-| accent (X blue)| `#1D9BF0`  |
-| like (rose)    | `#F91880`  |
-| repost (green) | `#00BA7C`  |
+| Token           | Hex        | Use                                         |
+| --------------- | ---------- | ------------------------------------------- |
+| background      | `#000000`  | true-black app background                   |
+| surface/hover   | `#16181C`  | elevated cards / hover tint                 |
+| border          | `#2F3336`  | hairline borders / dividers                 |
+| primary text    | `#E7E9EA`  | high-emphasis text                          |
+| secondary text  | `#71767B`  | muted text / `@handles`                     |
+| accent (X blue) | `#1D9BF0`  | primary accent, links, compose FAB          |
+| like (rose)     | `#F91880`  | like heart / engagement pink                |
+| repost (green)  | `#00BA7C`  | repost                                       |
+| subscribe       | `#C9379D`  | magenta Subscribe / creator upsell button   |
+| premium blue    | `#1DA1F2`  | softer premium/verified badge wash          |
 
 ## Running (on a Flutter-equipped machine)
 
@@ -190,6 +244,11 @@ once in the dashboard:
    a 6-digit code and the code-entry step in `auth_screen.dart` cannot succeed.
 3. (Optional) Under **Authentication → Providers → Email**, keep "Enable email
    provider" on; a password is not required for the OTP flow.
+4. (Optional, recommended for instant login) Under **Authentication →
+   Providers → Email**, turn **"Confirm email" off**. With confirmation off a
+   brand-new email can sign in immediately with the emitted 6-digit code (no
+   separate confirmation click), which is the smoothest OTP experience for this
+   app. Leaving it on still works but requires the first email to be confirmed.
 
 The client verifies with `verifyOTP(type: OtpType.email, ...)`, which expects
 the numeric token from `{{ .Token }}`. Magic-link click-through is **not** the

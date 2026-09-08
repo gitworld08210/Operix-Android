@@ -10,6 +10,7 @@ import '../utils/format.dart';
 import '../widgets/avatar.dart';
 import '../widgets/verified_badge.dart';
 import 'conversation_screen.dart';
+import 'search_screen.dart';
 
 /// Direct-message thread list backed by [MessageRepository.instance]. Shows
 /// real loading / empty / error states; tapping a conversation opens the
@@ -32,6 +33,17 @@ class _MessagesScreenState extends State<MessagesScreen> {
     }
   }
 
+  /// Opens Search so the user can find someone to message. A 1:1 DM is started
+  /// from the target's profile ("Message" button), so this routes there rather
+  /// than duplicating the center-nav compose (which posts, not DMs).
+  void _startNewMessage() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => const SearchScreen(),
+      ),
+    );
+  }
+
   Future<void> _openConversation(Conversation conversation) async {
     // Reset unread immediately so the badge clears when opening the thread.
     // ignore: discarded_futures
@@ -47,6 +59,13 @@ class _MessagesScreenState extends State<MessagesScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Messages')),
+      floatingActionButton: FloatingActionButton(
+        onPressed: _startNewMessage,
+        backgroundColor: AppColors.accent,
+        foregroundColor: AppColors.white,
+        tooltip: 'New message',
+        child: const Icon(Icons.add_comment_outlined),
+      ),
       body: AnimatedBuilder(
         animation: MessageRepository.instance,
         builder: (context, _) {

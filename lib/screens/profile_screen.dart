@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../data/auth_repository.dart';
@@ -17,6 +18,7 @@ import '../widgets/post_card.dart';
 import '../widgets/verified_badge.dart';
 import 'bookmarks_screen.dart';
 import 'conversation_screen.dart';
+import 'placeholder_screen.dart';
 import 'post_detail_screen.dart';
 
 /// Returns a lowercase file extension for [fileName] (without the dot),
@@ -27,11 +29,14 @@ String _extensionOf(String fileName) {
   return fileName.substring(dot + 1).toLowerCase();
 }
 
-/// Profile screen with a banner, overlapping avatar, bio + counts, and
-/// Posts / Media tabs. Supabase-backed for ANY profile: the current user gets
-/// Edit profile + a Bookmarks entry, other users get a real Follow/Following
-/// button wired to [ProfileRepository.toggleFollow]. The Posts/Media tabs read
-/// that profile's real posts via [PostRepository.postsByOwner].
+/// Profile screen with a banner, large overlapping avatar, bio + counts, and
+/// Posts / Replies / Media tabs. Supabase-backed for ANY profile: the current
+/// user gets a Share + Edit profile pair (and a "Get verified" pill + Bookmarks
+/// entry), other users get a Message button + a Subscribe-styled button wired
+/// to [ProfileRepository.toggleFollow]. Posts read that profile's real posts
+/// via [PostRepository.postsByOwner]; Media filters those to media; Replies
+/// shows an honest empty state (no per-owner replies query exists). A
+/// "Who to follow" footer uses real [ProfileRepository.suggestedProfiles].
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key, required this.profile});
 
@@ -49,11 +54,20 @@ class _ProfileScreenState extends State<ProfileScreen>
   bool _loading = true;
   bool _error = false;
 
+  List<UserProfile> _suggested = const <UserProfile>[];
+
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
+    _tabController = TabController(length: 3, vsync: this);
     _loadPosts();
+    _loadSuggested();
+  }
+
+  Future<void> _loadSuggested() async {
+    final people = await ProfileRepository.instance.suggestedProfiles(limit: 3);
+    if (!mounted) return;
+    setState(() => _suggested = people);
   }
 
   @override
@@ -224,8 +238,10 @@ class _ProfileScreenState extends State<ProfileScreen>
                 labelColor: AppColors.primaryText,
                 unselectedLabelColor: AppColors.secondaryText,
                 labelStyle: AppTextStyles.label,
+                indicatorSize: TabBarIndicatorSize.label,
                 tabs: const <Widget>[
                   Tab(text: 'Posts'),
+                  Tab(text: 'Replies'),
                   Tab(text: 'Media'),
                 ],
               ),
@@ -246,6 +262,17 @@ class _ProfileScreenState extends State<ProfileScreen>
               children: <Widget>[
                 _PostsTab(
                   posts: posts,
+                  loading: _loading,
+                  error: _error,
+                  onRetry: _loadPosts,
+                  suggested: _suggested,
+                ),
+                // There is no dedicated per-owner replies query in the data
+                // layer (PostRepository exposes postsByOwner / bookmarkedPosts
+                // / replies(parentId) / searchPosts), so rather than fabricate
+                // a list we show an honest empty state here. This keeps the
+                // tab structure ready for a future replies-by-owner feed.
+                _RepliesTab(
                   loading: _loading,
                   error: _error,
                   onRetry: _loadPosts,
@@ -334,7 +361,14 @@ class _ProfileHeader extends StatelessWidget {
                 Padding(
                   padding: const EdgeInsets.only(bottom: 4),
                   child: isCurrentUser
-                      ? _EditButton(onEdit: onEdit)
+                      ? Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: <Widget>[
+                            _ShareProfileButton(profile: profile),
+                            const SizedBox(width: AppSpacing.sm),
+                            _EditButton(onEdit: onEdit),
+                          ],
+                        )
                       : Row(
                           mainAxisSize: MainAxisSize.min,
                           children: <Widget>[
@@ -368,11 +402,43 @@ class _ProfileHeader extends StatelessWidget {
                     ],
                   ],
                 ),
+                // Own, not-yet-verified account gets X's "Get verified" upsell
+                // pill. It routes to the honest shared PlaceholderScreen rather
+                // than claiming a purchase/subscription flow this app has no
+                // backend for.
+                if (isCurrentUser && !profile.verified) ...<Widget>[
+                  const SizedBox(height: AppSpacing.sm),
+                  const _GetVerifiedPill(),
+                ],
+                const SizedBox(height: 2),
                 Text(profile.handle, style: AppTextStyles.handle),
                 if (profile.bio.isNotEmpty) ...<Widget>[
                   const SizedBox(height: AppSpacing.sm),
                   Text(profile.bio, style: AppTextStyles.body),
                 ],
+                const SizedBox(height: AppSpacing.sm),
+                // Meta row: only fields that actually exist on UserProfile are
+                // rendered. The model carries no born/joined/location, so we
+                // deliberately omit those rather than fabricate them, showing a
+                // small handle glyph instead.
+                Row(
+                  children: <Widget>[
+                    const Icon(
+                      Icons.alternate_email,
+                      size: 15,
+                      color: AppColors.secondaryText,
+                    ),
+                    const SizedBox(width: 4),
+                    Flexible(
+                      child: Text(
+                        profile.username,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: AppTextStyles.caption,
+                      ),
+                    ),
+                  ],
+                ),
                 const SizedBox(height: AppSpacing.sm),
                 Row(
                   children: <Widget>[
@@ -454,6 +520,70 @@ class _EditableAvatarState extends State<_EditableAvatar> {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// X's "Get verified" upsell pill shown on the current user's own profile when
+/// they are not yet verified. This app has no real verification purchase flow,
+/// so it routes to the honest shared [PlaceholderScreen] instead of pretending
+/// to sell a subscription.
+class _GetVerifiedPill extends StatelessWidget {
+  const _GetVerifiedPill();
+
+  @override
+  Widget build(BuildContext context) {
+    return OutlinedButton.icon(
+      onPressed: () => Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => const PlaceholderScreen(title: 'Get verified'),
+        ),
+      ),
+      icon: const Icon(Icons.verified, size: 16, color: AppColors.accent),
+      label: const Text('Get verified'),
+      style: OutlinedButton.styleFrom(
+        foregroundColor: AppColors.accent,
+        side: const BorderSide(color: AppColors.border),
+        shape: const StadiumBorder(),
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.md,
+          vertical: 2,
+        ),
+        visualDensity: VisualDensity.compact,
+        textStyle: AppTextStyles.label.copyWith(color: AppColors.accent),
+      ),
+    );
+  }
+}
+
+/// Copies a shareable link to this profile to the clipboard, mirroring
+/// [sharePost] in post_detail_screen.dart (no share-sheet package is bundled).
+class _ShareProfileButton extends StatelessWidget {
+  const _ShareProfileButton({required this.profile});
+
+  final UserProfile profile;
+
+  Future<void> _share(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final link = 'https://oneleven.app/${profile.username}';
+    await Clipboard.setData(ClipboardData(text: link));
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        const SnackBar(content: Text('Profile link copied to clipboard')),
+      );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return OutlinedButton(
+      onPressed: () => _share(context),
+      style: OutlinedButton.styleFrom(
+        foregroundColor: AppColors.primaryText,
+        side: const BorderSide(color: AppColors.border),
+        shape: const StadiumBorder(),
+      ),
+      child: const Text('Share'),
     );
   }
 }
@@ -564,14 +694,18 @@ class _FollowButton extends StatelessWidget {
             child: const Text('Following'),
           );
         }
-        return ElevatedButton(
+        // Not following: X shows a filled follow/subscribe CTA here. We use the
+        // magenta subscribe token for a Subscribe-styled button while keeping
+        // the real toggleFollow wiring intact (it inserts a follows row).
+        return ElevatedButton.icon(
           onPressed: () => ProfileRepository.instance.toggleFollow(targetId),
           style: ElevatedButton.styleFrom(
-            backgroundColor: AppColors.primaryText,
-            foregroundColor: AppColors.background,
+            backgroundColor: AppColors.subscribe,
+            foregroundColor: AppColors.white,
             shape: const StadiumBorder(),
           ),
-          child: const Text('Follow'),
+          icon: const Icon(Icons.star, size: 16, color: AppColors.white),
+          label: const Text('Subscribe'),
         );
       },
     );
@@ -606,9 +740,192 @@ class _PostsTab extends StatelessWidget {
     required this.loading,
     required this.error,
     required this.onRetry,
+    this.suggested = const <UserProfile>[],
   });
 
   final List<Post> posts;
+  final bool loading;
+  final bool error;
+  final Future<void> Function() onRetry;
+
+  /// Real suggested profiles (from [ProfileRepository.suggestedProfiles]) shown
+  /// as a "Who to follow" footer. Empty when none are available, in which case
+  /// the section is omitted rather than faked.
+  final List<UserProfile> suggested;
+
+  @override
+  Widget build(BuildContext context) {
+    if (loading) {
+      return const Center(
+        child: CircularProgressIndicator(color: AppColors.accent),
+      );
+    }
+    if (error) {
+      return _TabError(onRetry: onRetry);
+    }
+    if (posts.isEmpty) {
+      if (suggested.isEmpty) {
+        return Center(
+          child: Text('No posts yet', style: AppTextStyles.handle),
+        );
+      }
+      return ListView(
+        children: <Widget>[
+          Padding(
+            padding: const EdgeInsets.all(AppSpacing.xl),
+            child: Center(
+              child: Text('No posts yet', style: AppTextStyles.handle),
+            ),
+          ),
+          _WhoToFollow(people: suggested),
+        ],
+      );
+    }
+    final repo = PostRepository.instance;
+    final hasSuggestions = suggested.isNotEmpty;
+    return ListView.builder(
+      itemCount: posts.length + (hasSuggestions ? 1 : 0),
+      itemBuilder: (context, index) {
+        if (index == posts.length) {
+          return _WhoToFollow(people: suggested);
+        }
+        final post = posts[index];
+        return PostCard(
+          post: post,
+          onLike: () => repo.toggleLike(post.id),
+          onRepost: () => repo.toggleRepost(post.id),
+          onBookmark: () => repo.toggleBookmark(post.id),
+          onReply: () => openPostDetail(context, post, focusReply: true),
+          onShare: () => sharePost(context, post),
+          onTap: () => openPostDetail(context, post),
+          onAuthorTap: () => openAuthorProfile(context, post.author.id),
+        );
+      },
+    );
+  }
+}
+
+/// A "Who to follow" footer built ONLY from real suggested profiles
+/// ([ProfileRepository.suggestedProfiles]). Each row navigates to the real
+/// profile and offers a working follow toggle. Omitted entirely when there are
+/// no suggestions, so nothing is fabricated.
+class _WhoToFollow extends StatelessWidget {
+  const _WhoToFollow({required this.people});
+
+  final List<UserProfile> people;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        const Divider(height: 0.5),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+            AppSpacing.lg,
+            AppSpacing.md,
+            AppSpacing.lg,
+            AppSpacing.sm,
+          ),
+          child: Text('Who to follow', style: AppTextStyles.title),
+        ),
+        for (final person in people) _SuggestedTile(person: person),
+      ],
+    );
+  }
+}
+
+class _SuggestedTile extends StatelessWidget {
+  const _SuggestedTile({required this.person});
+
+  final UserProfile person;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      onTap: () => openAuthorProfile(context, person.id),
+      contentPadding: const EdgeInsets.symmetric(
+        horizontal: AppSpacing.lg,
+        vertical: 2,
+      ),
+      leading: Avatar(
+        url: person.avatarUrl,
+        displayName: person.displayName,
+        size: 44,
+      ),
+      title: Row(
+        children: <Widget>[
+          Flexible(
+            child: Text(
+              person.displayName,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AppTextStyles.name,
+            ),
+          ),
+          if (person.verified) ...<Widget>[
+            const SizedBox(width: 4),
+            VerifiedBadge(kind: person.verificationKind),
+          ],
+        ],
+      ),
+      subtitle: Text(person.handle, style: AppTextStyles.handle),
+      trailing: _FollowPill(targetId: person.id),
+    );
+  }
+}
+
+/// A compact follow/following pill wired to [ProfileRepository.toggleFollow],
+/// used in the "Who to follow" list.
+class _FollowPill extends StatelessWidget {
+  const _FollowPill({required this.targetId});
+
+  final String targetId;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: ProfileRepository.instance,
+      builder: (context, _) {
+        final following = ProfileRepository.instance.isFollowing(targetId);
+        if (following) {
+          return OutlinedButton(
+            onPressed: () => ProfileRepository.instance.toggleFollow(targetId),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: AppColors.primaryText,
+              side: const BorderSide(color: AppColors.border),
+              shape: const StadiumBorder(),
+              visualDensity: VisualDensity.compact,
+            ),
+            child: const Text('Following'),
+          );
+        }
+        return ElevatedButton(
+          onPressed: () => ProfileRepository.instance.toggleFollow(targetId),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: AppColors.primaryText,
+            foregroundColor: AppColors.background,
+            shape: const StadiumBorder(),
+            visualDensity: VisualDensity.compact,
+          ),
+          child: const Text('Follow'),
+        );
+      },
+    );
+  }
+}
+
+/// The Replies tab. There is no per-owner replies query in the data layer, so
+/// rather than fabricate content this shows a clean empty state (mirroring the
+/// Posts/Media tabs' loading/error handling). Ready to swap in a real
+/// replies-by-owner feed if the repository gains one.
+class _RepliesTab extends StatelessWidget {
+  const _RepliesTab({
+    required this.loading,
+    required this.error,
+    required this.onRetry,
+  });
+
   final bool loading;
   final bool error;
   final Future<void> Function() onRetry;
@@ -623,27 +940,8 @@ class _PostsTab extends StatelessWidget {
     if (error) {
       return _TabError(onRetry: onRetry);
     }
-    if (posts.isEmpty) {
-      return Center(
-        child: Text('No posts yet', style: AppTextStyles.handle),
-      );
-    }
-    final repo = PostRepository.instance;
-    return ListView.builder(
-      itemCount: posts.length,
-      itemBuilder: (context, index) {
-        final post = posts[index];
-        return PostCard(
-          post: post,
-          onLike: () => repo.toggleLike(post.id),
-          onRepost: () => repo.toggleRepost(post.id),
-          onBookmark: () => repo.toggleBookmark(post.id),
-          onReply: () => openPostDetail(context, post, focusReply: true),
-          onShare: () => sharePost(context, post),
-          onTap: () => openPostDetail(context, post),
-          onAuthorTap: () => openAuthorProfile(context, post.author.id),
-        );
-      },
+    return Center(
+      child: Text('No replies yet', style: AppTextStyles.handle),
     );
   }
 }
